@@ -1,0 +1,126 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2026-06-14 22:20:17.372727",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "section_break_f0rq",
+  "variable_name",
+  "variable_label",
+  "source_type",
+  "resolve_priority",
+  "source_config",
+  "column_break_kres",
+  "applies_to_doctype",
+  "applies_to_field",
+  "data_type",
+  "default_value",
+  "is_global",
+  "is_active"
+ ],
+ "fields": [
+  {
+   "fieldname": "section_break_f0rq",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "variable_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Variable Name",
+   "reqd": 1
+  },
+  {
+   "fieldname": "variable_label",
+   "fieldtype": "Data",
+   "label": "Label"
+  },
+  {
+   "fieldname": "source_type",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Source Type",
+   "options": "\nconstant\nlinked_doctype_field\nwhole_doctype\nchild_table_aggregate\nglobal_default\nsession_variable\ndoctype_query\ncustom_function\ndynamic_link\ncomputed"
+  },
+  {
+   "default": "100",
+   "fieldname": "resolve_priority",
+   "fieldtype": "Int",
+   "label": "Resolve Priority"
+  },
+  {
+   "fieldname": "source_config",
+   "fieldtype": "JSON",
+   "label": "Source Config"
+  },
+  {
+   "fieldname": "column_break_kres",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "applies_to_doctype",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Applies To Doctype",
+   "options": "DocType"
+  },
+  {
+   "fieldname": "applies_to_field",
+   "fieldtype": "Data",
+   "label": "Applies To Field"
+  },
+  {
+   "fieldname": "data_type",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Data Type",
+   "options": "\nFloat\nInt\nCurrency\nPercent\nCheck\nData\nObject"
+  },
+  {
+   "fieldname": "default_value",
+   "fieldtype": "Data",
+   "label": "Default Value"
+  },
+  {
+   "default": "0",
+   "fieldname": "is_global",
+   "fieldtype": "Check",
+   "in_standard_filter": 1,
+   "label": "Is Global"
+  },
+  {
+   "default": "1",
+   "fieldname": "is_active",
+   "fieldtype": "Check",
+   "in_standard_filter": 1,
+   "label": "Is Active"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-06-14 22:27:15.206732",
+ "modified_by": "Administrator",
+ "module": "Formula Builder",
+ "name": "Formula Variable Binding",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

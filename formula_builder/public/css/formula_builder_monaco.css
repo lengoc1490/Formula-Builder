@@ -1,0 +1,128 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   formula_builder_monaco.css  —  Monaco Editor Global Fixes
+   ═══════════════════════════════════════════════════════════════════════════
+   Gộp tất cả Monaco suggest/hover/overflow fixes từ 3 JS files.
+   Trước đây duplicate ở: builder.js §0, field.js, dialog.js §0.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Suggest widget — light theme override ─────────────────────────────── */
+.monaco-editor .suggest-widget {
+  background: #ffffff !important;
+  border: 1px solid #cbd5e1 !important;
+  box-shadow: 0 10px 15px -3px rgba(0,0,0,.1) !important;
+  color: #1e293b !important;
+  overflow: hidden !important;
+}
+.monaco-editor .suggest-widget .monaco-list      { overflow: hidden !important; }
+.monaco-editor .suggest-widget .monaco-list-rows  { overflow: hidden !important; }
+.monaco-editor .suggest-widget .monaco-list-row {
+  background: #ffffff !important;
+  color: #0f172a !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  line-height: 26px !important;
+  box-sizing: border-box !important;
+  max-width: 100% !important;
+}
+.monaco-editor .suggest-widget .monaco-list-row.focused {
+  background: #e2e8f0 !important;
+  color: #0f172a !important;
+}
+.monaco-editor .suggest-widget .monaco-list-row .monaco-highlighted-label {
+  color: #0f172a !important;
+  font-weight: 600 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  max-width: 100% !important;
+}
+.monaco-editor .suggest-widget .monaco-list-row .monaco-highlighted-label .highlight {
+  color: #d97706 !important;
+  font-weight: 700 !important;
+}
+.monaco-editor .suggest-widget .monaco-list-row .details-label {
+  color: #475569 !important;
+  font-size: 11px !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+/* ── Hover widget ──────────────────────────────────────────────────────── */
+.monaco-editor .monaco-hover,
+.monaco-editor .monaco-hover .monaco-hover-content {
+  background: #ffffff !important;
+  border: 1px solid #cbd5e1 !important;
+  color: #1e293b !important;
+  opacity: 1 !important;
+  box-shadow: 0 8px 20px rgba(0,0,0,.15) !important;
+  border-radius: 8px !important;
+  z-index: 100000 !important;
+  font-size: 12px !important;
+}
+.monaco-editor .monaco-hover .monaco-hover-content code {
+  background: #f1f5f9 !important;
+  color: #d97706 !important;
+  padding: 2px 4px !important;
+  border-radius: 4px !important;
+  font-family: 'JetBrains Mono', monospace !important;
+}
+
+/* ── Hide status bar "Insert ↵ / show more" ────────────────────────────── */
+.monaco-editor .suggest-widget .suggest-status-bar,
+.monaco-editor .suggest-widget .suggest-widget-status-bar,
+.overflowingContentWidgets .suggest-widget .suggest-status-bar,
+.overflowingContentWidgets .suggest-widget .suggest-widget-status-bar {
+  display: none !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  border-top: none !important;
+  overflow: hidden !important;
+}
+
+/* ── Overflow suggest widget ───────────────────────────────────────────── */
+.overflowingContentWidgets .suggest-widget {
+  z-index: 100000 !important;
+  max-height: 280px !important;
+}
+.overflowingContentWidgets .suggest-widget .tree {
+  height: 100% !important;
+}
+.overflowingContentWidgets .suggest-widget .monaco-list {
+  height: 100% !important;
+}
+
+/* ── View-lines padding — prevent suggest from covering last line ──────── */
+.afb-monaco .monaco-editor .view-lines,
+.afb-fp-monaco .monaco-editor .view-lines {
+  padding-bottom: 52px !important;
+}
+.afb-fp-monaco .monaco-editor .view-lines {
+  padding-bottom: 4px !important;  /* inline field needs less padding */
+}
+
+/* ── Overflow guard — allow suggest to overflow container ──────────────── */
+.afb-monaco .monaco-editor,
+.afb-monaco .monaco-editor .overflow-guard,
+.afb-fp-monaco .monaco-editor,
+.afb-fp-monaco .monaco-editor .overflow-guard {
+  overflow: visible !important;
+}
+
+/* ── Modal body overflow fix ───────────────────────────────────────────── */
+.modal .modal-body {
+  overflow: visible !important;
+}
+
+/* ── Dialog-specific Monaco fixes ──────────────────────────────────────── */
+.afbd-dialog .monaco-editor .view-lines {
+  padding-bottom: 52px !important;
+}
+.afbd-dialog .monaco-editor,
+.afbd-dialog .monaco-editor .overflow-guard {
+  overflow: visible !important;
+}
+.afbd-dialog .overflowingContentWidgets .suggest-widget {
+  z-index: 110000 !important;
+}

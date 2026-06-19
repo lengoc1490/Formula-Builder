@@ -28,6 +28,20 @@ app_license = "mit"
 # app_include_css = "/assets/formula_builder/css/formula_builder.css"
 # app_include_js = "/assets/formula_builder/js/formula_builder.js"
 
+app_include_css = [
+    "/assets/formula_builder/css/formula_builder_vars.css?v=1.0.1",
+    "/assets/formula_builder/css/formula_builder_monaco.css?v=1.0.1",
+    "/assets/formula_builder/css/formula_builder.css?v=1.0.1",
+    "/assets/formula_builder/css/formula_builder_field.css?v=1.0.1",
+    "/assets/formula_builder/css/formula_builder_dialog.css?v=1.0.1",
+]
+
+app_include_js = [
+    "/assets/formula_builder/js/formula_builder.js?v=2.0.1",
+    "/assets/formula_builder/js/formula_builder_field.js?v=2.0.1",
+    "/assets/formula_builder/js/formula_builder_dialog.js?v=2.0.1",
+]
+
 # include js, css files in header of web template
 # web_include_css = "/assets/formula_builder/css/formula_builder.css"
 # web_include_js = "/assets/formula_builder/js/formula_builder.js"
@@ -242,3 +256,14 @@ app_license = "mit"
 # 	"Logging DocType Name": 30  # days to retain logs
 # }
 
+doc_events = {
+    "Formula Global Variable":    {"on_update": "formula_builder.api.formula_builder.invalidate_suggestions_cache"},
+    "Formula Set":                {"on_update": "formula_builder.api.formula_builder.invalidate_suggestions_cache"},
+    "Formula Builder Settings":   {"on_update": "formula_builder.api.formula_builder.invalidate_suggestions_cache"},
+}
+
+fixtures = [
+    {"doctype": "Formula Builder Settings", "filters": [["name", "=", "Formula Builder Settings"]]}
+]
+
+after_migrate = "formula_builder.install.after_migrate"

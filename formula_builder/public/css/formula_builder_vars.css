@@ -1,0 +1,47 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   formula_builder_vars.css  —  Design Tokens & Shared Animations
+   ═══════════════════════════════════════════════════════════════════════════
+   Load đầu tiên để đảm bảo tất cả CSS variables có sẵn cho mọi component.
+   Dùng chung bởi: formula_builder.js, formula_builder_field.js, formula_builder_dialog.js
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --afb-bg0:       #ffffff;
+  --afb-bg1:       #f8fafc;
+  --afb-bg2:       #f1f5f9;
+  --afb-bg3:       #e2e8f0;
+  --afb-bg4:       #cbd5e1;
+  --afb-border:    #cbd5e1;
+  --afb-border2:   #94a3b8;
+  --afb-text:      #1e293b;
+  --afb-text2:     #334155;
+  --afb-text3:     #64748b;
+  --afb-amber:     #f59e0b;
+  --afb-amber2:    #fbbf24;
+  --afb-green:     #10b981;
+  --afb-red:       #ef4444;
+  --afb-blue:      #3b82f6;
+  --afb-purple:    #8b5cf6;
+  --afb-cyan:      #06b6d4;
+  --afb-pink:      #ec4899;
+  --afb-orange:    #f97316;
+  --afb-radius:    6px;
+  --afb-mono:      'JetBrains Mono','Fira Code','Cascadia Code',monospace;
+  --afb-ui:        'Inter','Segoe UI',sans-serif;
+  --afb-shadow-md: 0 2px 4px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.1);
+  --afb-shadow-lg: 0 10px 15px -3px rgba(0,0,0,.1),0 4px 6px -2px rgba(0,0,0,.06);
+  --afb-tr:        150ms cubic-bezier(.4,0,.2,1);
+}
+
+/* ── Shared Keyframe Animations ─────────────────────────────────────────── */
+@keyframes afb-fade-in {
+  from { opacity:0; transform:translateY(4px); }
+  to   { opacity:1; transform:none; }
+}
+@keyframes afb-spin {
+  to { transform:rotate(360deg); }
+}
+@keyframes shimmer {
+  0%   { background-position:200% 0; }
+  100% { background-position:-200% 0; }
+}

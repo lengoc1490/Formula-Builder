@@ -1,0 +1,128 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2026-06-14 21:43:55.008345",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "section_break_fmje",
+  "title",
+  "max_formula_length",
+  "rate_limit_validate",
+  "rate_limit_evaluate",
+  "column_break_ozka",
+  "rate_limit_ai",
+  "ai_provider",
+  "ai_model",
+  "section_break_riu9",
+  "allowed_functions",
+  "db_query_allowed_doctypes",
+  "formula_column_names",
+  "custom_function_whitelist"
+ ],
+ "fields": [
+  {
+   "fieldname": "section_break_fmje",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "label": "Title"
+  },
+  {
+   "default": "2000",
+   "fieldname": "max_formula_length",
+   "fieldtype": "Int",
+   "label": "Max Formula Length"
+  },
+  {
+   "default": "40",
+   "fieldname": "rate_limit_validate",
+   "fieldtype": "Int",
+   "label": "Rate Limit (validate/min)"
+  },
+  {
+   "default": "20",
+   "fieldname": "rate_limit_evaluate",
+   "fieldtype": "Int",
+   "label": "Rate Limit (evaluate/min)"
+  },
+  {
+   "default": "5",
+   "fieldname": "rate_limit_ai",
+   "fieldtype": "Int",
+   "label": "Rate Limit (AI suggest/min)"
+  },
+  {
+   "fieldname": "ai_provider",
+   "fieldtype": "Select",
+   "label": "AI Provider",
+   "options": "\nAnthropic\nDeepseek\nChatgpt"
+  },
+  {
+   "default": "claude-3-sonnet-20240229",
+   "fieldname": "ai_model",
+   "fieldtype": "Data",
+   "label": "AI Model"
+  },
+  {
+   "fieldname": "column_break_ozka",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "section_break_riu9",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "allowed_functions",
+   "fieldtype": "Table",
+   "label": "Allowed Functions",
+   "options": "Formula Allowed Function"
+  },
+  {
+   "fieldname": "db_query_allowed_doctypes",
+   "fieldtype": "Table",
+   "label": "DB Query Allowed Doctypes",
+   "options": "Formula DB Query Doctype"
+  },
+  {
+   "fieldname": "formula_column_names",
+   "fieldtype": "Table",
+   "label": "Formula Column Names",
+   "description": "Danh sách tên field chứa công thức trong child table (vd: custom_qty_formula, custom_price_formula). Dùng để auto-detect formula fields khi build cross-ref DAG.",
+   "options": "Formula Column Name"
+  },
+  {
+   "fieldname": "custom_function_whitelist",
+   "fieldtype": "Small Text",
+   "label": "Custom Function Whitelist",
+   "description": "Danh sách prefix module được phép import khi dùng custom_function source (mỗi dòng một prefix). Để trống dùng mặc định."
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-06-14 21:59:54.513696",
+ "modified_by": "Administrator",
+ "module": "Formula Builder",
+ "name": "Formula Builder Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
