@@ -137,30 +137,17 @@
   padding-bottom: 4px !important;
 }
 
-/* ── Expanded row (grid-row-open) — allow suggest to overflow ─────────── */
-.grid-row-open,
-.grid-row-open .control-input,
-.grid-row-open .form-layout,
-.grid-row-open .form-in-grid,
-.grid-row-open .grid-form-body,
-.grid-row-open .grid-form-row {
-  overflow: visible !important;
-}
-
 /* ── Expanded row — surgical containment fix ─────────────────────────── */
 /* Frappe grid body có thể dùng contain: strict/content/paint hoặc     */
 /* container-type → tạo containing block → fixedOverflowWidgets tính    */
 /* sai vị trí suggest. Chỉ reset trên các element trong expanded row.   */
 /* Không đụng vào transform vì Frappe dùng cho animation grid.           */
+/* overflow:visible đã được chuyển sang xử lý động bởi _fixGridContainBlock */
+/* trong formula_builder_field.js — chỉ bật khi editor đang focus,       */
+/* restore khi blur → giữ lại scrollbar dọc của bảng con.                */
 .grid-row-open .form-in-grid,
 .grid-row-open .grid-form-body,
 .grid-row-open .grid-form-row {
+  contain: none !important;
   container-type: normal !important;
-}
-
-/* ── Override Frappe desk.bundle: form-in-grid + grid-form-body clip suggest ── */
-/* Frappe v16: .grid-row-open .form-in-grid { overflow: auto } gây clip Monaco suggest */
-.grid-row-open .form-in-grid,
-.grid-row-open .form-in-grid .grid-form-body {
-  overflow: visible !important;
 }

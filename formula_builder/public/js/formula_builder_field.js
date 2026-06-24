@@ -199,7 +199,7 @@ function _ensureFieldPatchCSS() {
       position: relative;
     }
     .afb-fp-monaco .monaco-editor .overflow-guard {
-      overflow: hidden !important;
+      overflow: visible !important;
     }
     .afb-fp-monaco .monaco-editor .view-lines {
       padding-bottom: 4px !important;
@@ -344,16 +344,8 @@ function _ensureFieldPatchCSS() {
     }
 
     /* ── Frappe grid overrides (injected at runtime → beats Frappe CSS) ── */
-    /* Allow Monaco suggest to overflow expanded grid row containers */
-    .grid-row-open,
-    .grid-row-open .form-in-grid,
-    .grid-row-open .grid-form-body,
-    .grid-row-open .grid-form-row,
-    .grid-row-open .form-layout,
-    .grid-row-open .form-section,
-    .grid-row-open .control-input {
-      overflow: visible !important;
-    }
+    /* overflow:visible cho grid container đã chuyển sang xử lý động bởi
+       _fixGridContainBlock (chỉ bật khi editor focus, restore khi blur).     */
     /* Prevent Frappe contain:paint/content from trapping position:fixed */
     .grid-row-open .form-in-grid,
     .grid-row-open .grid-form-body,
@@ -404,26 +396,42 @@ function _getValTooltip() {
 // neutralizes these properties. All values are restored when the editor is
 // disposed, so Frappe layout is only affected while the user is typing.
 function _fixGridContainBlock(editorContainer) {
-  if (!editorContainer.closest('.grid-body')) return function(){};
+  // Chỉ chạy khi editor nằm trong grid context
+  if (!editorContainer.closest('.grid-body, .form-in-grid')) return function(){};
 
-  // With fixedOverflowWidgets:false, the suggest stays inside the editor.
-  // Every ancestor with overflow:hidden clips it. We temporarily set
-  // overflow:visible on ALL ancestors including our own wrappers.
-  // This removes corner clipping but only while the editor is active.
+  // Với fixedOverflowWidgets:false, suggest dùng position:absolute nằm trong
+  // editor. Chỉ cần set overflow:visible trên editor containers và .control-input
+  // (wrapper trực tiếp của field) để suggest thoát ra khỏi editor.
+  // KHÔNG leo lên .grid-form-body / .grid-form-row / .form-in-grid / .grid-body
+  // vì đó là các container có scrollbar của bảng con.
   var restores = [];
   var el = editorContainer;
   while (el && el !== document.body) {
-    var ov = getComputedStyle(el).getPropertyValue('overflow');
-    if (ov && ov !== 'visible') {
-      restores.push({ el: el, orig: el.style.getPropertyValue('overflow') });
-      el.style.setProperty('overflow', 'visible', 'important');
+    // Dừng ngay khi gặp bất kỳ grid container nào — giữ nguyên scrollbar hệ thống
+    if (el.classList.contains('grid-form-body') ||
+        el.classList.contains('grid-form-row') ||
+        el.classList.contains('form-in-grid') ||
+        el.classList.contains('grid-body')) break;
+
+    var ovX = getComputedStyle(el).getPropertyValue('overflow-x');
+    var ovY = getComputedStyle(el).getPropertyValue('overflow-y');
+    if ((ovX && ovX !== 'visible') || (ovY && ovY !== 'visible')) {
+      restores.push({
+        el: el,
+        origOvX: el.style.getPropertyValue('overflow-x'),
+        origOvY: el.style.getPropertyValue('overflow-y'),
+      });
+      el.style.setProperty('overflow-x', 'visible', 'important');
+      el.style.setProperty('overflow-y', 'visible', 'important');
     }
     el = el.parentElement;
   }
   return function() {
     restores.forEach(function(r) {
-      if (r.orig) r.el.style.setProperty('overflow', r.orig, 'important');
-      else r.el.style.removeProperty('overflow');
+      if (r.origOvX) r.el.style.setProperty('overflow-x', r.origOvX, 'important');
+      else           r.el.style.removeProperty('overflow-x');
+      if (r.origOvY) r.el.style.setProperty('overflow-y', r.origOvY, 'important');
+      else           r.el.style.removeProperty('overflow-y');
     });
   };
 }
@@ -1552,21 +1560,23 @@ formula_builder.formula.initGridField = function(frm, gridField, fieldname, opts
             wrapper     : expandedWrapper,
         });
 
-        // FIX: expanded row container cần overflow visible để suggest widget không bị clip
-        const rowContainer = expandedWrapper.closest(".grid-row-open");
-        if (rowContainer) {
-            rowContainer.style.overflow = "visible";
-            const formLayout = rowContainer.querySelector(".form-layout, .form-in-grid");
-            if (formLayout) formLayout.style.overflow = "visible";
-        }
+        // overflow:visible cho grid container được xử lý động bởi
+        // _fixGridContainBlock (focus → visible, blur → restore scrollbar)
 
-        // MutationObserver: khi row đóng → xóa key để click handler có thể tạo lại
+        // MutationObserver: khi row đóng → dispose editor + xóa key
+        // QUAN TRỌNG: phải gọi api.dispose() để _fixGridContainBlock restore
+        // overflow về giá trị gốc → giữ scrollbar dọc của bảng con.
         if (!rowEl._afbCloseObserver) {
             rowEl._afbCloseObserver = new MutationObserver(() => {
                 if (!rowEl.classList.contains("grid-row-open")) {
                     rowEl._afbCloseObserver.disconnect();
                     rowEl._afbCloseObserver = null;
-                    // Editor expanded đã bị Frappe destroy cùng DOM → xóa key
+                    // Gọi dispose để restoreGridContain() chạy, trả lại
+                    // overflow:auto cho .form-in-grid và các ancestors.
+                    const api = window._afbPatchedEditors?.[key];
+                    if (api) {
+                        try { api.dispose(); } catch (e) { console.warn("[FormulaBuilder] dispose failed:", e); }
+                    }
                     delete window._afbPatchedEditors?.[key];
                 }
             });
