@@ -10,8 +10,8 @@
 /* ── Field patch wrap ──────────────────────────────────────────────────── */
 .afb-fp-wrap {
   border: 1px solid var(--afb-border, #cbd5e1);
-  border-radius: var(--afb-radius, 6px) !important;
-  overflow: hidden !important;
+  border-radius: var(--afb-radius, 6px);
+  overflow: hidden;
   background: var(--afb-bg0, #fff);
   transition: border-color var(--afb-tr, 150ms), box-shadow var(--afb-tr, 150ms);
   position: relative;
@@ -42,6 +42,12 @@
 }
 .afb-fp-monaco .monaco-editor .overflow-guard {
   overflow: hidden !important;
+}
+.afb-fp-monaco .monaco-editor .view-lines {
+  padding-bottom: 4px !important;
+}
+.overflowingContentWidgets .suggest-widget {
+  z-index: 100000 !important;
 }
 
 /* ── Preview bar ───────────────────────────────────────────────────────── */

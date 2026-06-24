@@ -563,7 +563,7 @@
   padding: 2px 7px; border-radius: 3px; font-weight: 600;
 }
 .afb-fp-monaco {
-  border-radius: 0 0 var(--afb-radius) var(--afb-radius); overflow: hidden;
+  border-radius: 0 0 var(--afb-radius) var(--afb-radius); overflow: visible;
 }
 
 /* Preview badge */

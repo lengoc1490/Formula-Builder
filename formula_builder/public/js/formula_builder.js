@@ -2298,8 +2298,19 @@ formula_builder.formula.openDialog = function(opts = {}) {
     display: flex;
     align-items: center;
     justify-content: center;
-    backdrop-filter: blur(2px);
   `;
+  // backdrop-filter moved to a child div to avoid creating a containing-block
+  // for fixed-position suggest widgets (Monaco fixedOverflowWidgets)
+  const overlayBg = document.createElement("div");
+  overlayBg.style.cssText = `
+    position: fixed;
+    inset: 0;
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+    z-index: -1;
+    pointer-events: none;
+  `;
+  overlay.appendChild(overlayBg);
 
   // Dialog container
   dialog = document.createElement("div");
