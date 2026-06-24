@@ -84,18 +84,19 @@
 /* ── Overflow suggest widget ───────────────────────────────────────────── */
 .overflowingContentWidgets .suggest-widget {
   z-index: 100000 !important;
+  min-height: 200px !important;
   max-height: 280px !important;
 }
 .overflowingContentWidgets .suggest-widget .tree {
   height: 100% !important;
+  min-height: 200px !important;
 }
 .overflowingContentWidgets .suggest-widget .monaco-list {
   height: 100% !important;
 }
 
 /* ── View-lines padding — prevent suggest from covering last line ──────── */
-.afb-monaco .monaco-editor .view-lines,
-.afb-fp-monaco .monaco-editor .view-lines {
+.afb-monaco .monaco-editor .view-lines {
   padding-bottom: 52px !important;
 }
 .afb-fp-monaco .monaco-editor .view-lines {
@@ -125,4 +126,41 @@
 }
 .afbd-dialog .overflowingContentWidgets .suggest-widget {
   z-index: 110000 !important;
+}
+
+/* ── Grid cell editor — overflow visible để suggest không bị clip ─────── */
+.afb-grid-cell-editor .monaco-editor,
+.afb-grid-cell-editor .monaco-editor .overflow-guard {
+  overflow: visible !important;
+}
+.afb-grid-cell-editor .monaco-editor .view-lines {
+  padding-bottom: 4px !important;
+}
+
+/* ── Expanded row (grid-row-open) — allow suggest to overflow ─────────── */
+.grid-row-open,
+.grid-row-open .control-input,
+.grid-row-open .form-layout,
+.grid-row-open .form-in-grid,
+.grid-row-open .grid-form-body,
+.grid-row-open .grid-form-row {
+  overflow: visible !important;
+}
+
+/* ── Expanded row — surgical containment fix ─────────────────────────── */
+/* Frappe grid body có thể dùng contain: strict/content/paint hoặc     */
+/* container-type → tạo containing block → fixedOverflowWidgets tính    */
+/* sai vị trí suggest. Chỉ reset trên các element trong expanded row.   */
+/* Không đụng vào transform vì Frappe dùng cho animation grid.           */
+.grid-row-open .form-in-grid,
+.grid-row-open .grid-form-body,
+.grid-row-open .grid-form-row {
+  container-type: normal !important;
+}
+
+/* ── Override Frappe desk.bundle: form-in-grid + grid-form-body clip suggest ── */
+/* Frappe v16: .grid-row-open .form-in-grid { overflow: auto } gây clip Monaco suggest */
+.grid-row-open .form-in-grid,
+.grid-row-open .form-in-grid .grid-form-body {
+  overflow: visible !important;
 }

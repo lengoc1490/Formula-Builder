@@ -155,14 +155,223 @@ function _esc(str) {
     .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 }
 
-// ── CSS — now loaded externally via app_include_css ──────────────────────────
+// ── CSS — CRITICAL runtime injection (must match OLD code exactly) ─────────
+// OLD code inject CSS at runtime AFTER Frappe desk CSS → always wins cascade.
+// NEW code's external CSS (app_include_css) loads BEFORE Frappe → overridden.
+// This function replicates the OLD behavior: inject all field-patch CSS at
+// runtime when first patchField/patchChildField/initGridField is called.
 function _ensureFieldPatchCSS() {
-  // CSS đã được tách ra file riêng và load qua app_include_css.
-  // Giữ guard check để không phá vỡ backward-compat.
-  if (document.getElementById("afb-field-patch-css")) return;
+  if (document.getElementById("afb-field-patch-css-v3")) return;
   const s = document.createElement("style");
-  s.id = "afb-field-patch-css";
-  s.textContent = ""; // CSS moved to public/css/
+  s.id = "afb-field-patch-css-v3";
+  s.textContent = `
+    /* ── Field patch wrap ──────────────────────────────────────────────── */
+    .afb-fp-wrap {
+      border: 1px solid var(--afb-border, #cbd5e1);
+      border-radius: var(--afb-radius, 6px);
+      overflow: hidden;
+      background: var(--afb-bg0, #fff);
+      transition: border-color var(--afb-tr, 150ms), box-shadow var(--afb-tr, 150ms);
+      position: relative;
+    }
+    .afb-fp-wrap:focus-within {
+      border-color: var(--afb-amber, #f59e0b);
+      box-shadow: 0 0 0 3px rgba(245,158,11,.12);
+    }
+    .afb-fp-toolbar {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 8px;
+      background: var(--afb-bg1, #f8fafc);
+      border-bottom: 1px solid var(--afb-border, #cbd5e1);
+      font-size: 11px;
+    }
+    .afb-fp-lang-badge {
+      font-family: var(--afb-mono, monospace);
+      font-size: 10px;
+      background: var(--afb-bg3, #e2e8f0);
+      color: var(--afb-text2, #334155);
+      padding: 2px 7px; border-radius: 3px;
+      font-weight: 600; letter-spacing: .3px;
+    }
+    .afb-fp-monaco {
+      border-radius: 0;
+      overflow: hidden;
+      position: relative;
+    }
+    .afb-fp-monaco .monaco-editor .overflow-guard {
+      overflow: hidden !important;
+    }
+    .afb-fp-monaco .monaco-editor .view-lines {
+      padding-bottom: 4px !important;
+    }
+    .overflowingContentWidgets .suggest-widget {
+      z-index: 100000 !important;
+    }
+    .afb-fp-preview {
+      display: flex; align-items: center; gap: 5px;
+      padding: 3px 6px 3px 8px;
+      background: var(--afb-bg1, #f8fafc);
+      border-top: 1px solid var(--afb-border, #cbd5e1);
+      font-size: 11px; font-family: var(--afb-mono, monospace);
+      min-height: 24px; user-select: none;
+    }
+    .afb-fp-preview-icon {
+      color: var(--afb-text3, #64748b);
+      flex-shrink: 0; font-size: 10px;
+    }
+    .afb-fp-preview-val {
+      flex: 1;
+      color: var(--afb-text3, #64748b);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      transition: color 150ms;
+    }
+    .afb-fp-preview-val.ok    { color: var(--afb-green, #10b981); font-weight: 600; }
+    .afb-fp-preview-val.error { color: var(--afb-red, #ef4444); }
+    .afb-fp-preview-val.running { color: var(--afb-amber, #f59e0b); }
+    .afb-fp-btn {
+      cursor: pointer;
+      font-size: 10px; flex-shrink: 0;
+      padding: 2px 7px; border-radius: 3px;
+      border: 1px solid var(--afb-border, #cbd5e1);
+      background: var(--afb-bg3, #e2e8f0);
+      color: var(--afb-text2, #334155);
+      transition: background var(--afb-tr, 150ms), border-color var(--afb-tr, 150ms);
+      font-family: var(--afb-ui, sans-serif);
+      line-height: 1.4;
+    }
+    .afb-fp-btn:hover { background: var(--afb-bg4, #cbd5e1); }
+    .afb-fp-btn.dialog-btn {
+      border-color: var(--afb-amber, #f59e0b);
+      color: var(--afb-amber, #f59e0b);
+    }
+    .afb-fp-btn.dialog-btn:hover {
+      background: rgba(245,158,11,.1);
+    }
+    .afb-fp-val-tooltip {
+      position: fixed;
+      z-index: 99999;
+      background: #1e293b;
+      color: #f1f5f9;
+      border-radius: 5px;
+      padding: 5px 10px;
+      font-size: 11px;
+      font-family: var(--afb-mono, monospace);
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 120ms;
+      max-width: 320px;
+      word-break: break-all;
+      box-shadow: 0 4px 12px rgba(0,0,0,.25);
+      line-height: 1.5;
+    }
+    .afb-fp-val-tooltip.visible { opacity: 1; }
+    .afb-fp-val-tooltip-name {
+      color: #93c5fd; font-weight: 700; font-size: 11px; display: block;
+    }
+    .afb-fp-val-tooltip-val {
+      color: #86efac; font-size: 12px; display: block; margin-top: 2px;
+    }
+    .afb-fp-val-tooltip-meta {
+      color: #94a3b8; font-size: 10px; display: block; margin-top: 2px;
+    }
+
+    /* ── Backward compat aliases ───────────────────────────────────────── */
+    .aluglass-field-patch-wrap { border:1px solid var(--afb-border,#cbd5e1);border-radius:var(--afb-radius,6px);overflow:hidden;background:#fff;transition:border-color 150ms,box-shadow 150ms; }
+    .aluglass-field-patch-wrap:focus-within { border-color:var(--afb-amber,#f59e0b);box-shadow:0 0 0 3px rgba(245,158,11,.12); }
+    .aluglass-fp-toolbar  { display:flex;align-items:center;gap:6px;padding:4px 8px;background:var(--afb-bg1,#f8fafc);border-bottom:1px solid var(--afb-border,#cbd5e1);font-size:11px; }
+    .aluglass-fp-lang-badge { font-family:monospace;font-size:10px;background:var(--afb-bg3,#e2e8f0);color:var(--afb-text2,#334155);padding:2px 7px;border-radius:3px;font-weight:600; }
+    .aluglass-fp-monaco   { overflow:visible;position:relative; }
+    .aluglass-fp-monaco .monaco-editor .overflow-guard { overflow:visible !important; }
+    .aluglass-btn { display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;border:1px solid var(--afb-border,#cbd5e1);background:var(--afb-bg3,#e2e8f0);color:var(--afb-text,#1e293b);outline:none;white-space:nowrap;transition:background 150ms,border-color 150ms; }
+    .aluglass-btn:hover { background:var(--afb-bg4,#cbd5e1); }
+
+    /* ── Inline grid cell ──────────────────────────────────────────────── */
+    .afb-grid-cell-wrap {
+      position: relative;
+      width: 100%;
+    }
+    .afb-grid-cell-editor {
+      position: absolute;
+      inset: 0;
+      z-index: 10;
+      background: #fff;
+      border: 1.5px solid var(--afb-amber, #f59e0b);
+      border-radius: 4px;
+      box-shadow: 0 2px 8px rgba(245,158,11,.15);
+      overflow: visible;
+    }
+    .afb-grid-cell-static {
+      padding: 3px 6px;
+      font-size: 12px;
+      font-family: var(--afb-mono, monospace);
+      color: var(--afb-text, #1e293b);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-height: 24px;
+      line-height: 24px;
+      cursor: text;
+    }
+    .afb-grid-cell-static:empty::before {
+      content: "—";
+      color: var(--afb-text3, #94a3b8);
+    }
+
+    /* Float popup mode */
+    .afb-grid-float-popup {
+      position: absolute;
+      z-index: 9999;
+      background: #fff;
+      border: 2px solid var(--afb-amber, #f59e0b);
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.18), 0 2px 8px rgba(245,158,11,.12);
+      overflow: visible;
+    }
+    .afb-grid-float-popup .afb-fp-wrap,
+    .afb-grid-float-popup .afb-grid-cell-editor {
+      height: 100% !important;
+      border: none !important;
+      border-radius: 6px !important;
+      box-shadow: none !important;
+    }
+    .afb-grid-float-popup::before {
+      content: "";
+      position: absolute;
+      bottom: -8px; left: 20px;
+      border: 8px solid transparent;
+      border-bottom: none;
+      border-top-color: var(--afb-amber, #f59e0b);
+    }
+
+    /* ── Frappe grid overrides (injected at runtime → beats Frappe CSS) ── */
+    /* Allow Monaco suggest to overflow expanded grid row containers */
+    .grid-row-open,
+    .grid-row-open .form-in-grid,
+    .grid-row-open .grid-form-body,
+    .grid-row-open .grid-form-row,
+    .grid-row-open .form-layout,
+    .grid-row-open .form-section,
+    .grid-row-open .control-input {
+      overflow: visible !important;
+    }
+    /* Prevent Frappe contain:paint/content from trapping position:fixed */
+    .grid-row-open .form-in-grid,
+    .grid-row-open .grid-form-body,
+    .grid-row-open .grid-form-row {
+      contain: none !important;
+      container-type: normal !important;
+    }
+    .afb-grid-cell-editor .monaco-editor,
+    .afb-grid-cell-editor .monaco-editor .overflow-guard {
+      overflow: visible !important;
+    }
+    .afb-grid-cell-editor .monaco-editor .view-lines {
+      padding-bottom: 4px !important;
+    }
+    .afbd-dialog .overflowingContentWidgets .suggest-widget {
+      z-index: 110000 !important;
+    }
+  `;
   document.head.appendChild(s);
 }
 
@@ -173,6 +382,50 @@ function _getValTooltip() {
   _valTooltipEl.className = "afb-fp-val-tooltip";
   document.body.appendChild(_valTooltipEl);
   return _valTooltipEl;
+}
+
+// ── Grid body contain fix ──────────────────────────────────────────────────────
+// Frappe v15/v16 dùng `contain: content/paint` trên .grid-body để tối ưu
+// performance. Contain tạo containing block cho `position: fixed`, khiến
+// ── Fix Frappe grid containing-block ─────────────────────────────────────────
+// Frappe v15/v16 uses CSS properties on grid containers that create a
+// containing block for `position: fixed`. Monaco's fixedOverflowWidgets
+// uses `position: fixed` to position suggest widgets. When trapped inside
+// a containing block, the suggest widget:
+//   1. Gets positioned relative to the grid instead of the viewport (văng xa)
+//   2. Gets clipped by overflow:hidden on the grid container (che công thức)
+//
+// Properties that create containing blocks for position:fixed:
+//   transform, filter, backdrop-filter, perspective, will-change,
+//   contain:paint, contain:layout, contain:strict, contain:content,
+//   container-type (any non-normal value)
+//
+// This helper walks up the DOM from the editor to the body and temporarily
+// neutralizes these properties. All values are restored when the editor is
+// disposed, so Frappe layout is only affected while the user is typing.
+function _fixGridContainBlock(editorContainer) {
+  if (!editorContainer.closest('.grid-body')) return function(){};
+
+  // With fixedOverflowWidgets:false, the suggest stays inside the editor.
+  // Every ancestor with overflow:hidden clips it. We temporarily set
+  // overflow:visible on ALL ancestors including our own wrappers.
+  // This removes corner clipping but only while the editor is active.
+  var restores = [];
+  var el = editorContainer;
+  while (el && el !== document.body) {
+    var ov = getComputedStyle(el).getPropertyValue('overflow');
+    if (ov && ov !== 'visible') {
+      restores.push({ el: el, orig: el.style.getPropertyValue('overflow') });
+      el.style.setProperty('overflow', 'visible', 'important');
+    }
+    el = el.parentElement;
+  }
+  return function() {
+    restores.forEach(function(r) {
+      if (r.orig) r.el.style.setProperty('overflow', r.orig, 'important');
+      else r.el.style.removeProperty('overflow');
+    });
+  };
 }
 
 // ── ContextBuilder helper ─────────────────────────────────────────────────────
@@ -514,6 +767,13 @@ function _createInlineMonaco({ container, initialValue, cfg, contextFn, onChange
     valBar.style.cssText = "font-size:10px;padding:2px 6px;color:#64748b;background:#f8fafc;border-top:1px solid #e2e8f0;border-bottom-left-radius:4px;border-bottom-right-radius:4px;";
     previewEl.parentNode.insertBefore(valBar, previewEl.nextSibling);
   }
+
+  // Grid context: .form-in-grid has transform which traps position:fixed.
+  // Solution: use fixedOverflowWidgets:false so suggest stays inside editor
+  // using position:absolute (not affected by transform).
+  // Everything else identical to parent field.
+  var inGrid = !!(container.closest('.grid-body') || container.closest('.form-in-grid'));
+
   monacoEditor = monaco.editor.create(container, {
     value               : initialValue || "",
     language            : cfg.language,
@@ -533,12 +793,19 @@ function _createInlineMonaco({ container, initialValue, cfg, contextFn, onChange
     suggest             : { preview: true, showStatusBar: false, insertMode: "replace", showIcons: true, showFields: true, showVariables: true, showSnippets: true },
     suggestFontSize     : 13,
     suggestLineHeight   : 24,
-    fixedOverflowWidgets: true,
+    fixedOverflowWidgets: inGrid ? false : true,
     padding             : { top: 6, bottom: 16 },
     scrollbar           : { vertical: "auto", horizontal: "hidden", useShadows: false },
     overviewRulerLanes  : 0,
     renderLineHighlight : "none",
   });
+
+  // BUG FIX: đảm bảo view-lines không bị padding-bottom 52px từ .afb-monaco rule
+  requestAnimationFrame(() => {
+    const vl = container.querySelector(".monaco-editor .view-lines");
+    if (vl) vl.style.setProperty("padding-bottom", "4px", "important");
+  });
+
   const model = monacoEditor.getModel();
   formula_builder.formula.CompletionRegistry.ensureLanguage(cfg.language);
   formula_builder.formula.CompletionRegistry.register(model, _buildCompletionHandler(monacoEditor, contextFn), cfg.language);
@@ -612,6 +879,10 @@ function _patchFieldCommon({ uid, cfg, initialValueFn, $wrap, $inputArea, previe
     if (typeof monaco === "undefined") throw new Error("Monaco not loaded");
     const container = document.getElementById(`fpm-${uid}`);
     if (!container) return;
+
+    // ── Fix Frappe grid containing-block (contain: paint/content) ─────────
+    const restoreGridContain = _fixGridContainBlock(container);
+
     const inst = _createInlineMonaco({
       container,
       initialValue: initialValueFn(),
@@ -631,7 +902,8 @@ function _patchFieldCommon({ uid, cfg, initialValueFn, $wrap, $inputArea, previe
     api.getEditor = inst.getEditor;
     api.getValue  = inst.getValue;
     api.setValue  = inst.setValue;
-    api._dispose  = inst.dispose;
+    const origDispose = inst.dispose;
+    api._dispose = () => { restoreGridContain(); origDispose(); };
   }).catch(err => {
     console.error("[FormulaBuilder] Monaco load failed, using fallback textarea:", err);
     const container = document.getElementById(`fpm-${uid}`);
@@ -1047,6 +1319,8 @@ formula_builder.formula.initGridField = function(frm, gridField, fieldname, opts
           // Kiểm tra lại — có thể cell đã đóng trước khi Monaco load
           if (!document.body.contains(editorContainer)) return;
 
+          const restoreGridContain = _fixGridContainBlock(editorContainer);
+
           const inst = _createInlineMonaco({
               container   : editorContainer,
               initialValue: _currentVal(cdn),
@@ -1065,6 +1339,7 @@ formula_builder.formula.initGridField = function(frm, gridField, fieldname, opts
           api.setValue  = inst.setValue;
           api._dispose  = inst.dispose;
           api.dispose   = () => {
+              restoreGridContain();
               inst.dispose();
               editorContainer.style.display = "none";
               if (staticEl) {
@@ -1277,6 +1552,14 @@ formula_builder.formula.initGridField = function(frm, gridField, fieldname, opts
             wrapper     : expandedWrapper,
         });
 
+        // FIX: expanded row container cần overflow visible để suggest widget không bị clip
+        const rowContainer = expandedWrapper.closest(".grid-row-open");
+        if (rowContainer) {
+            rowContainer.style.overflow = "visible";
+            const formLayout = rowContainer.querySelector(".form-layout, .form-in-grid");
+            if (formLayout) formLayout.style.overflow = "visible";
+        }
+
         // MutationObserver: khi row đóng → xóa key để click handler có thể tạo lại
         if (!rowEl._afbCloseObserver) {
             rowEl._afbCloseObserver = new MutationObserver(() => {
@@ -1372,7 +1655,7 @@ formula_builder.formula.initGridField = function(frm, gridField, fieldname, opts
                     const rowEl = frappeRow.wrapper?.[0] || frappeRow.$wrapper?.[0];
                     if (!rowEl?.classList.contains("grid-row-open")) return;
                     _bindExpandedRow(cdn, rowEl);
-                }, 200);
+                }, 300);
             },
         });
     }

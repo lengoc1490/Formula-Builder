@@ -10,8 +10,8 @@
 /* ── Field patch wrap ──────────────────────────────────────────────────── */
 .afb-fp-wrap {
   border: 1px solid var(--afb-border, #cbd5e1);
-  border-radius: var(--afb-radius, 6px);
-  overflow: hidden;
+  border-radius: var(--afb-radius, 6px) !important;
+  overflow: hidden !important;
   background: var(--afb-bg0, #fff);
   transition: border-color var(--afb-tr, 150ms), box-shadow var(--afb-tr, 150ms);
   position: relative;
