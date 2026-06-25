@@ -194,3 +194,7 @@
   border-bottom: none;
   border-top-color: var(--afb-amber, #f59e0b);
 }
+
+.afb-fp-monaco {
+  border-top: 1px solid #e2e8f0;
+}

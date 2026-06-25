@@ -199,7 +199,7 @@ function _ensureFieldPatchCSS() {
       position: relative;
     }
     .afb-fp-monaco .monaco-editor .overflow-guard {
-      overflow: visible !important;
+      overflow: hidden !important;
     }
     .afb-fp-monaco .monaco-editor .view-lines {
       padding-bottom: 4px !important;

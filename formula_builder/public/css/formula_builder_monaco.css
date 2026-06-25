@@ -106,8 +106,7 @@
 /* ── Overflow guard — allow suggest to overflow container ──────────────── */
 .afb-monaco .monaco-editor,
 .afb-monaco .monaco-editor .overflow-guard,
-.afb-fp-monaco .monaco-editor,
-.afb-fp-monaco .monaco-editor .overflow-guard {
+.afb-fp-monaco .monaco-editor {
   overflow: visible !important;
 }
 
