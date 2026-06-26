@@ -1,13 +1,7 @@
-# formula_utils/normalize.py
-# Formula normalization, hashing, and helper functions
-
 import re
-import ast
 import hashlib
 import json
 from typing import Any, Dict, List, Set, Optional, Tuple, Union
-from decimal import Decimal
-import inspect
 
 _PERCENT_RE = re.compile(r'(?<!\w)(\d+(?:\.\d+)?)\s*%')
 
@@ -16,80 +10,6 @@ _LOGIC_REMAP: Dict[str, str] = {
     'or':  'or_',
     'not': 'not_',
 }
-
-_PARAM_EXCLUDES: frozenset = frozenset({
-    'x', 'y', 'z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h',
-    'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't',
-    'lo', 'hi', 'dt',
-    'col', 'key', 'fmt', 'nth', 'sep', 'end', 'old', 'new',
-})
-
-# ----------------------------------------------------------------------
-# _build_known_kwargs  — LAZY import để tránh circular
-# ----------------------------------------------------------------------
-
-def _build_known_kwargs() -> frozenset:
-    """
-    Xây dựng frozenset chứa tất cả tham số keyword argument từ BASE_FUNCS.
-
-    Import BASE_FUNCS bên trong hàm (lazy) để tránh circular:
-      normalize → registry → agg/text → normalize  ❌
-    Khi hàm này được gọi lần đầu, toàn bộ funcs/ đã load xong → an toàn.
-    """
-    # ── Lazy import ────────────────────────────────────────────────────
-    from .funcs.registry import BASE_FUNCS  # noqa: PLC0415
-
-    known: set = set()
-    EXCLUDE_SHORT = 3
-    SKIP_NAMES = {
-        'self', 'cls', 'args', 'kwargs',
-        'x', 'y', 'z', 'a', 'b', 'c',
-        'i', 'j', 'k', 'n', 'm',
-        'lo', 'hi', 'dt', 'col', 'key', 'fmt', 'nth', 'sep', 'end', 'old', 'new',
-    }
-
-    for func in BASE_FUNCS.values():
-        if not callable(func):
-            continue
-        try:
-            sig = inspect.signature(func)
-            for param_name, param in sig.parameters.items():
-                if param.kind in (
-                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                    inspect.Parameter.KEYWORD_ONLY,
-                ):
-                    if len(param_name) >= EXCLUDE_SHORT and param_name not in SKIP_NAMES:
-                        known.add(param_name)
-        except (ValueError, TypeError):
-            continue
-
-    extra = {
-        "default", "sort_by", "reverse", "value_key", "group_by",
-        "missing_value", "error_on_missing_sort_key",
-        "unit", "start", "length", "match_type", "if_not_found",
-        "trace_mode", "delimiter", "ignore_empty", "decimals", "ndigits",
-        "preserve_order", "value", "days", "months", "years",
-        "sources", "targets", "method", "source_id_key", "source_amount_key",
-        "target_id_key", "target_qty_key", "target_amount_key",
-        "target_weight_key", "target_pct_key", "target_manual_amount_key",
-        "target_manual_pct_key", "rounding_policy", "round_digits",
-        "mixed_residual_method", "id_key", "dep_ids_key", "deps_list_key",
-        "dep_id_key", "id_fn", "deps_fn", "epsilon", "max_iter_fallback",
-        "b_fn", "coeff_fn", "output_fn", "feasibility_fn",
-    }
-    known.update(extra)
-    return frozenset(known)
-
-
-# Khởi tạo lười — None cho đến lần gọi normalize_formula() đầu tiên
-_KNOWN_KWARGS: Optional[frozenset] = None
-
-def _get_known_kwargs() -> frozenset:
-    global _KNOWN_KWARGS
-    if _KNOWN_KWARGS is None:
-        _KNOWN_KWARGS = _build_known_kwargs()
-    return _KNOWN_KWARGS
-
 
 # ----------------------------------------------------------------------
 # normalize_formula
@@ -100,12 +20,14 @@ def normalize_formula(expr: str, canonical_names: frozenset) -> str:
     Chuẩn hóa công thức:
       - Chuyển % thành /100
       - Chuyển <> thành !=
-      - Chuyển = thành == (trừ khi là keyword argument)
+      - Chuyển = thành == (mọi dấu = đơn lẻ đều là so sánh)
       - Chuẩn hóa tên hàm (lowercase → canonical)
       - Chuyển and/or/not thành and_/or_/not_ khi gọi hàm
-    """
-    known_kwargs = _get_known_kwargs()   # lazy load lần đầu gọi
 
+    Tham số:
+        expr: Công thức gốc (string)
+        canonical_names: Tên hàm/variable chuẩn hóa (frozenset)
+    """
     expr = _PERCENT_RE.sub(r'(\1/100)', expr)
 
     lower_map: Dict[str, str] = {}
@@ -121,6 +43,7 @@ def normalize_formula(expr: str, canonical_names: frozenset) -> str:
     while i < n:
         ch = expr[i]
 
+        # Xử lý chuỗi trong dấu nháy
         if ch in ('"', "'"):
             quote = ch
             result.append(ch)
@@ -140,46 +63,42 @@ def normalize_formula(expr: str, canonical_names: frozenset) -> str:
                 i += 1
             continue
 
+        # Xử lý '<>' -> '!='
         if ch == '<' and i + 1 < n and expr[i + 1] == '>':
             result.append('!=')
             i += 2
             continue
 
+        # Xử lý dấu '='
         if ch == '=':
             next_ch = expr[i + 1] if i + 1 < n else ''
             prev_ch = expr[i - 1] if i > 0    else ''
 
+            # Đã có '==' -> giữ nguyên
             if next_ch == '=':
                 result.append('==')
                 i += 2
                 continue
 
+            # Các trường hợp '!=', '<=', '>=' hoặc '=' đứng sau các ký tự này
             if prev_ch in ('!', '<', '>', '='):
                 result.append(ch)
                 i += 1
                 continue
 
-            if prev_ch == ' ' or next_ch == ' ':
-                result.append('==')
-                i += 1
-                continue
-
-            j = i - 1
-            while j >= 0 and (expr[j].isalnum() or expr[j] == '_'):
-                j -= 1
-            ident_before = expr[j + 1:i]
-
-            is_kwarg = (len(ident_before) >= 3 and ident_before in known_kwargs)
-            result.append('=' if is_kwarg else '==')
+            # Mọi '=' còn lại đều là so sánh
+            result.append('==')
             i += 1
             continue
 
+        # Xử lý tên (identifier) và hàm
         if ch.isalpha() or ch == '_':
             j = i
             while j < n and (expr[j].isalnum() or expr[j] == '_'):
                 j += 1
             ident = expr[i:j]
 
+            # Kiểm tra xem có phải gọi hàm không (theo sau là '(')
             k = j
             while k < n and expr[k] == ' ':
                 k += 1
@@ -203,6 +122,7 @@ def normalize_formula(expr: str, canonical_names: frozenset) -> str:
                 i = j
             continue
 
+        # Các ký tự khác giữ nguyên
         result.append(ch)
         i += 1
 
@@ -214,7 +134,7 @@ def normalize_formula(expr: str, canonical_names: frozenset) -> str:
 # ----------------------------------------------------------------------
 
 def match_criteria(value: Any, criteria: Any) -> bool:
-    """Kiểm tra giá trị có khớp với tiêu chí."""
+    """Kiểm tra giá trị có khớp với tiêu chí (hỗ trợ wildcard và so sánh)."""
     tc = type(criteria)
     if tc is int or tc is float:
         try:
@@ -284,10 +204,12 @@ def safe_str(x: Any) -> str:
 # ----------------------------------------------------------------------
 
 def hash_formulas(formulas: List[Dict[str, str]]) -> str:
+    """Tạo SHA-256 hash cho danh sách công thức."""
     payload = json.dumps(formulas, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
 
 def hash_dict(data: Dict[str, Any]) -> str:
+    """Tạo SHA-256 hash cho một dict bất kỳ."""
     payload = json.dumps(data, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()
