@@ -11,6 +11,7 @@ Each handler is registered via @register_source(source_type) and receives:
 """
 from __future__ import annotations
 
+import ast
 import json
 import importlib
 from collections import deque
@@ -73,6 +74,164 @@ def _cast(val: Any, dtype: str = "Float") -> Any:
         return str(val)
     except Exception:
         return val
+
+
+# ── Filter expression security validator ──────────────────────────────────────
+
+# AST nodes bị cấm TUYỆT ĐỐI trong filter_expr
+# KHÔNG chặn Attribute, Call — người dùng được dùng mọi hàm từ settings
+# Bảo mật thực sự: eval(__builtins__={}) + scope bị giới hạn bởi safe_globals
+_FILTER_FORBIDDEN_NODES: frozenset = frozenset({
+    "Import", "ImportFrom", "Exec", "Eval",
+    "FunctionDef", "AsyncFunctionDef", "ClassDef",
+    "Delete", "Global", "Nonlocal", "Await", "Yield", "YieldFrom",
+    "Lambda", "DictComp", "SetComp",
+    "Assign", "AugAssign", "AnnAssign", "NamedExpr",
+})
+
+# Tên TUYỆT ĐỐI bị cấm — tất cả tên khác đều được phép
+_FILTER_FORBIDDEN_NAMES: frozenset = frozenset({
+    "__import__", "globals", "locals", "vars", "dir",
+    "__class__", "__bases__", "__mro__", "__subclasses__",
+    "__builtins__", "__globals__", "__code__", "__func__",
+    "__self__", "__dict__", "__module__", "__qualname__",
+    "exec", "eval", "compile", "open", "breakpoint", "input",
+})
+
+# Cache lazy — build lần đầu tiên khi cần, sau đó tái sử dụng
+_filter_allowed_calls_cache: Optional[frozenset] = None
+_filter_safe_globals_cache: Optional[dict] = None
+
+
+def _get_filter_context() -> tuple:
+    """Lazy-build allowed function names + safe_globals từ Formula Builder Settings.
+
+    Gọi get_allowed_funcs() — single source of truth:
+      - Có settings: tôn trọng admin config (enable/disable từng hàm)
+      - Không có settings: fallback về toàn bộ BASE_FUNCS (~80+ hàm)
+      - Có cache Redis TTL 300s
+
+    Returns:
+        (allowed_names: frozenset, safe_globals: dict)
+    """
+    global _filter_allowed_calls_cache, _filter_safe_globals_cache
+
+    if _filter_safe_globals_cache is not None:
+        return _filter_allowed_calls_cache, _filter_safe_globals_cache
+
+    try:
+        from formula_builder.api.settings_cache import get_allowed_funcs
+        allowed = get_allowed_funcs()
+    except Exception:
+        from formula_builder.formula_utils import BASE_FUNCS
+        allowed = dict(BASE_FUNCS)
+
+    _filter_allowed_calls_cache = frozenset(allowed.keys())
+
+    _filter_safe_globals_cache = {
+        "row": None,
+        "True": True,
+        "False": False,
+        "None": None,
+    }
+    _filter_safe_globals_cache.update(allowed)
+
+    return _filter_allowed_calls_cache, _filter_safe_globals_cache
+
+
+def _invalidate_filter_context_cache() -> None:
+    """Xóa cache — gọi khi Formula Builder Settings thay đổi."""
+    global _filter_allowed_calls_cache, _filter_safe_globals_cache
+    _filter_allowed_calls_cache = None
+    _filter_safe_globals_cache = None
+
+
+def _validate_filter_expr(filter_expr: str) -> None:
+    """Validate filter expression cho child_table_aggregate.
+
+    Cho phép TOÀN BỘ hàm từ formula_utils BASE_FUNCS (~80+ hàm):
+      - row.field, row.qty > 0, row.rate * row.qty
+      - sum(row.items), count(row.items), average(row.values)
+      - IF(row.qty > 10, 'big', 'small')
+      - vlookup(row.code, table, 2)
+      - sumif(row.items, '>0', row.values)
+      - len(row.items) > 0, abs(row.val) > 100, round(row.val, 2)
+      - Toán tử: == != < > <= >= and or not in is
+      - Literal: số, chuỗi, True/False/None
+
+    Chỉ chặn:
+      - import, eval, exec, lambda, class/function def
+      - Dunder attributes (row.__class__, row.__dict__, ...)
+      - Subscript (row['field'] — dùng row.field thay thế)
+      - Method calls (obj.method() style)
+
+    Raises:
+        ValueError: nếu filter_expr chứa cấu trúc nguy hiểm.
+    """
+    if not filter_expr or not filter_expr.strip():
+        return
+
+    # 1. Parse AST
+    try:
+        tree = ast.parse(filter_expr.strip(), mode="eval")
+    except SyntaxError as e:
+        raise ValueError(f"Filter expression syntax error: {e.msg}") from e
+
+    # 2. Walk AST — kiểm tra từng node
+    allowed_calls, _ = _get_filter_context()
+
+    for node in ast.walk(tree):
+        node_type = type(node).__name__
+
+        # --- Chặn forbidden node types ---
+        if node_type in _FILTER_FORBIDDEN_NODES:
+            raise ValueError(
+                f"Forbidden operation '{node_type}' in filter expression."
+            )
+
+        # --- Kiểm tra Name (biến, hằng) ---
+        if node_type == "Name":
+            name = node.id  # type: ignore[attr-defined]
+            if name in _FILTER_FORBIDDEN_NAMES:
+                raise ValueError(
+                    f"Forbidden name '{name}' in filter expression."
+                )
+            # Tất cả các tên khác đều được phép — eval context đã giới hạn scope
+
+        # --- Kiểm tra Attribute (row.field) ---
+        if node_type == "Attribute":
+            attr = node.attr  # type: ignore[attr-defined]
+            if attr.startswith("__"):
+                raise ValueError(
+                    f"Dunder attribute '.{attr}' is not allowed in filter. "
+                    "Use normal field names like row.qty, row.rate."
+                )
+            # Attribute hợp lệ — tiếp tục
+
+        # --- Kiểm tra Call (gọi hàm) ---
+        if node_type == "Call":
+            if isinstance(node.func, ast.Name):  # type: ignore[attr-defined]
+                fname = node.func.id  # type: ignore[attr-defined]
+                if fname not in allowed_calls:
+                    raise ValueError(
+                        f"Function '{fname}()' is not available. "
+                        "Check Formula Builder Settings for enabled functions."
+                    )
+            elif isinstance(node.func, ast.Attribute):  # type: ignore[attr-defined]
+                raise ValueError(
+                    "Method calls (e.g. obj.method()) are not allowed in filter."
+                )
+            else:
+                raise ValueError(
+                    "Complex call expressions are not allowed in filter."
+                )
+
+        # --- Chặn Subscript (row['field']) ---
+        if node_type == "Subscript":
+            raise ValueError(
+                "Subscript access (e.g. row['field']) is not allowed in filter. "
+                "Use row.field_name instead."
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -188,10 +347,20 @@ def _handle_child_table_aggregate(binding: dict, doc, resolved_so_far: dict) -> 
         return 0 if aggregate == "count" else ([] if aggregate == "list" else None)
 
     if filter_expr:
-        safe_globals = {
-            "row": None, "int": int, "float": float, "str": str,
-            "bool": bool, "len": len, "abs": abs, "round": round,
-        }
+        # Validate filter expression AST security trước khi eval
+        try:
+            _validate_filter_expr(filter_expr)
+        except ValueError as e:
+            frappe.log_error(
+                f"Filter expression rejected for '{binding.get('variable_name')}': {e}",
+                "DataSource: child_table_aggregate",
+            )
+            return None
+
+        # Dùng get_allowed_funcs() từ settings (single source of truth)
+        # Mặc định: tất cả BASE_FUNCS (~80+ hàm), admin có thể tùy chỉnh
+        _, base_globals = _get_filter_context()
+        safe_globals = dict(base_globals)
         filtered = []
         for r in rows:
             safe_globals["row"] = r

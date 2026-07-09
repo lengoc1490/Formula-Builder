@@ -26,6 +26,30 @@ _FORBIDDEN_FIELDS = frozenset({
     "name", "_liked_by", "_comments", "_assign", "_user_tags"
 })
 
+# ── AI System Prompt ────────────────────────────────────────────────────────
+_AI_SYSTEM_PROMPT = (
+    "You are a formula assistant for ERPNext Formula Builder. "
+    "Your ONLY job is to convert user requests into valid formula expressions "
+    "using the syntax and functions listed below.\n\n"
+    "RULES:\n"
+    "1. Output ONLY the raw formula expression — no markdown, no code blocks, no explanations.\n"
+    "2. Only use functions from the allowed list below. Do NOT invent new functions.\n"
+    "3. Use Python-like syntax: IF(cond, true_val, false_val), arithmetic (+, -, *, /), "
+    "comparisons (==, !=, <, >, <=, >=), and logical operators (and, or, not).\n"
+    "4. Variable names may appear as bare identifiers. Do NOT quote them.\n"
+    "5. Strings must use single quotes: 'hello', not \"hello\".\n"
+    "6. If the request is unclear, respond with: ERROR: [brief reason]\n"
+    "7. Max response length: 500 characters.\n\n"
+)
+
+# Patterns để detect code blocks và dangerous content trong AI response
+_AI_CLEANUP_PATTERNS = [
+    (_re.compile(r'```[a-zA-Z]*\s*\n'), ''),   # ```python\n → remove
+    (_re.compile(r'\n```'),             ''),   # closing ``` → remove
+    (_re.compile(r'^```'),              ''),   # standalone ``` → remove
+    (_re.compile(r'^`|`$'),             ''),   # wrapping backticks → remove
+]
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 def _sanitize_frm_doc(raw: dict, doctype: str) -> dict:
     """Lọc frm_doc từ JS – chỉ giữ field có trong meta, loại system fields."""
@@ -137,6 +161,46 @@ def _ev(success, result, error, explain, ctx_used, cross_ref, elapsed_ms=None):
         "cross_ref":    cross_ref,
         "elapsed_ms":   elapsed_ms,   # JS render: ⏱ ${r.elapsed_ms}ms
     }
+
+
+# ── Engine Cache ───────────────────────────────────────────────────────────
+
+_ENGINE_CACHE: Dict[str, FormulaEngine] = {}
+_ENGINE_CACHE_MAX = 128
+
+
+def _engine_cache_key(formula: str, allowed_funcs: dict) -> str:
+    """Tạo cache key từ formula + fingerprint của allowed functions."""
+    import hashlib
+    formula_hash = hashlib.sha256(formula.encode("utf-8")).hexdigest()
+    func_names = ",".join(sorted(allowed_funcs.keys()))
+    func_hash = hashlib.sha256(func_names.encode("utf-8")).hexdigest()
+    return f"{formula_hash}:{func_hash}"
+
+
+def _get_or_create_engine(formula: str, allowed_funcs: dict) -> FormulaEngine:
+    """Lấy FormulaEngine từ cache hoặc tạo mới. Giới hạn 128 entries (LRU-style)."""
+    key = _engine_cache_key(formula, allowed_funcs)
+
+    if key in _ENGINE_CACHE:
+        return _ENGINE_CACHE[key]
+
+    # Evict oldest entry nếu cache đầy
+    if len(_ENGINE_CACHE) >= _ENGINE_CACHE_MAX:
+        oldest_key = next(iter(_ENGINE_CACHE))
+        del _ENGINE_CACHE[oldest_key]
+
+    engine = FormulaEngine(
+        formulas=[{"name": "__r__", "formula": formula}],
+        safe_funcs=allowed_funcs,
+    )
+    _ENGINE_CACHE[key] = engine
+    return engine
+
+
+def _invalidate_engine_cache() -> None:
+    """Xóa toàn bộ engine cache — gọi khi settings thay đổi."""
+    _ENGINE_CACHE.clear()
 
 
 # ── SECTION 1: Suggestions ─────────────────────────────────────────────────
@@ -329,10 +393,7 @@ def evaluate_formula(
                        inputs, cross_ref, elapsed_ms=elapsed)
         else:
             full_ctx = resolver.build_full_context(ctx, extra)
-            engine = FormulaEngine(
-                formulas=[{"name":"__r__","formula":formula}],
-                safe_funcs=allowed,
-            )
+            engine = _get_or_create_engine(formula, allowed)
             results = engine.calculate(full_ctx)
             elapsed = round((time.monotonic() - t0) * 1000, 1)
             return _ev(True, results.get("__r__"), None,
@@ -619,12 +680,19 @@ def invalidate_suggestions_cache(doc=None, method=None,
                                   current_doctype=None, current_docname=None):
     try:
         if current_doctype and current_docname:
-            try: 
+            try:
                 frappe.cache().delete_keys(f"fb_sugg:{current_doctype}:{current_docname}:*")
             except Exception:
                 pass
         frappe.cache().delete_value("fb_sugg:*")
         _invalidate_settings_cache()
+        _invalidate_engine_cache()
+        # Đồng bộ: xóa cache filter context trong data_source_registry
+        try:
+            from formula_builder.api.data_source_registry import _invalidate_filter_context_cache
+            _invalidate_filter_context_cache()
+        except Exception:
+            pass
     except Exception:
         pass
     return {"ok":True}
@@ -647,10 +715,7 @@ def explain_formula(formula, scope_context_json=None):
         allowed = get_allowed_funcs()
         full_ctx = resolver.build_full_context(ctx)
 
-        engine = FormulaEngine(
-            formulas=[{"name": "__r__", "formula": formula}],
-            safe_funcs=allowed,
-        )
+        engine = _get_or_create_engine(formula, allowed)
         results = engine.calculate(full_ctx)
 
         explain_obj = engine.explain("__r__", full_ctx)
@@ -764,6 +829,60 @@ def _build_debug_info(formula: str, full_ctx: dict, allowed: dict) -> dict:
     return debug_info
 
 
+# ── AI Helpers ───────────────────────────────────────────────────────────────
+
+def _build_ai_system_prompt() -> str:
+    """Build system prompt từ Formula Builder Settings (single source of truth).
+
+    get_allowed_funcs() trả về:
+      - Có settings: các hàm admin đã enable
+      - Không có settings: toàn bộ BASE_FUNCS (~80+ hàm)
+    """
+    try:
+        allowed = get_allowed_funcs()
+    except Exception:
+        allowed = dict(BASE_FUNCS)
+    func_list = ", ".join(sorted(allowed.keys()))
+    return _AI_SYSTEM_PROMPT + f"ALLOWED FUNCTIONS: {func_list}"
+
+
+def _sanitize_ai_response(text: str) -> str:
+    """Clean AI response: strip markdown fences, trim, basic safety check.
+
+    NOTE: FormulaEngine.parse() + SecurityValidator là gatekeeper chính.
+    Hàm này chỉ làm sạch formatting, không chặn nội dung — engine sẽ reject
+    nếu công thức không hợp lệ hoặc chứa code nguy hiểm.
+    """
+    if not text:
+        return ""
+
+    # Strip markdown code fences (```python ... ```)
+    for pattern, replacement in _AI_CLEANUP_PATTERNS:
+        text = pattern.sub(replacement, text)
+
+    text = text.strip()
+
+    # Truncate at 500 chars
+    if len(text) > 500:
+        text = text[:500]
+
+    # Chỉ chặn các chuỗi rõ ràng là code injection — còn lại để engine validate
+    _hard_block = [
+        "__import__", "__class__", "__subclasses__", "__builtins__",
+        "__globals__", "__code__", "__dict__", "__bases__", "__mro__",
+    ]
+    for pattern in _hard_block:
+        if pattern in text:
+            return ""
+
+    # Cho phép tối đa 5 dòng (công thức IF lồng phức tạp có thể xuống dòng)
+    lines = [line for line in text.split("\n") if line.strip()]
+    if len(lines) > 5:
+        return ""
+
+    return text
+
+
 # ── SECTION 7: Smart Suggest ───────────────────────────────────────────────
 @frappe.whitelist()
 def smart_suggest_formula(doctype="", fieldname="", field_label="",
@@ -866,24 +985,60 @@ def smart_suggest_formula(doctype="", fieldname="", field_label="",
 
 @frappe.whitelist()
 def ai_suggest_formula(prompt):
-    """Proxy call tới Anthropic API - key chỉ ở server."""
+    """Proxy call tới Anthropic API với system prompt bảo mật — key chỉ ở server.
+
+    Prompt được gửi trong system message để ngăn prompt injection.
+    Response được sanitize để chỉ trả về công thức thuần.
+    """
     _check_rate_limit("ai_suggest", limit=5, window=60)
-    if not prompt or len(str(prompt)) > 2000:
+
+    # Validate input
+    user_text = str(prompt).strip() if prompt else ""
+    if not user_text:
         return {"text": ""}
+    if len(user_text) > 2000:
+        return {"text": ""}
+
     try:
         import anthropic
         api_key = frappe.conf.get("anthropic_api_key") or frappe.get_site_config().get("anthropic_api_key")
         if not api_key:
             frappe.log_error("anthropic_api_key chưa cấu hình", "Formula Builder AI")
             return {"text": ""}
+
         client = anthropic.Anthropic(api_key=api_key)
         settings = frappe.get_single("Formula Builder Settings")
+        system_prompt = _build_ai_system_prompt()
+
         msg = client.messages.create(
             model=settings.ai_model or "claude-3-5-sonnet-20241022",
             max_tokens=600,
-            messages=[{"role": "user", "content": str(prompt)}],
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_text}],
         )
-        return {"text": msg.content[0].text if msg.content else ""}
+
+        raw_text = msg.content[0].text if msg.content else ""
+        sanitized = _sanitize_ai_response(raw_text)
+
+        if sanitized:
+            # Validate formula syntax với get_allowed_funcs() (single source of truth)
+            try:
+                allowed = get_allowed_funcs()
+                FormulaEngine(
+                    formulas=[{"name": "__ai__", "formula": sanitized}],
+                    safe_funcs=allowed,
+                )
+            except (FormulaError, FormulaValidationError) as e:
+                frappe.log_error(
+                    f"AI suggested invalid formula rejected: {sanitized} | Error: {e}",
+                    "Formula Builder AI",
+                )
+                return {"text": ""}
+            except Exception:
+                pass
+
+        return {"text": sanitized}
+
     except ImportError:
         frappe.log_error("Thiếu thư viện anthropic: pip install anthropic", "Formula Builder AI")
         return {"text": ""}
