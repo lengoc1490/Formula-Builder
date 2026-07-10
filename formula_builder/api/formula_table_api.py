@@ -64,14 +64,30 @@ def _safe_result(val):
     return val
 
 
+# ── Cache cho _load_formula_set — tránh load DB lặp lại ──────────────────
+_fs_cache: dict = {}
+_FS_CACHE_MAX = 32
+
+
+def _invalidate_fs_cache():
+    """Xóa cache _load_formula_set + _cell_engine_cache — gọi khi settings thay đổi."""
+    _fs_cache.clear()
+    _cell_engine_cache.clear()
+
+
 def _load_formula_set(config_doctype: str | None, config_name: str | None) -> dict:
     """
-    Load FormulaSet document nếu được chỉ định.
+    Load FormulaSet document nếu được chỉ định. Có cache 32 entries.
     Trả về dict với keys:
-        safe_funcs  : dict | None   (extra functions để inject vào engine)
-        allowed_fns : list | None   (danh sách tên hàm được phép validate)
+        safe_funcs  : dict | None
+        allowed_fns : list | None
     Nếu không có config → fallback về Formula Builder Settings global.
     """
+    # Cache lookup
+    cache_key = f"{config_doctype or '__none__'}:{config_name or '__none__'}"
+    if cache_key in _fs_cache:
+        return _fs_cache[cache_key]
+
     from formula_builder.formula_utils import BASE_FUNCS
 
     def _build_from_rows(fn_rows) -> dict:
@@ -91,46 +107,55 @@ def _load_formula_set(config_doctype: str | None, config_name: str | None) -> di
                 result[alias.strip()] = BASE_FUNCS[func_name]
         return result
 
+    result = None  # type: dict | None
+
     # ── Không có config → dùng Formula Builder Settings global ──────────────
     if not (config_doctype and config_name):
         try:
             safe_funcs = get_allowed_funcs()
-            return {"safe_funcs": safe_funcs, "allowed_fns": list(safe_funcs.keys())}
+            result = {"safe_funcs": safe_funcs, "allowed_fns": list(safe_funcs.keys())}
         except Exception:
-            return {"safe_funcs": None, "allowed_fns": None}
+            result = {"safe_funcs": None, "allowed_fns": None}
+    else:
+        # ── Có config → load từ DocType chỉ định ────────────────────────────
+        try:
+            doc = frappe.get_doc(config_doctype, config_name)
+            fn_rows = doc.get("allowed_functions") or []
 
-    # ── Có config → load từ DocType chỉ định ────────────────────────────────
-    try:
-        doc = frappe.get_doc(config_doctype, config_name)
-        fn_rows = doc.get("allowed_functions") or []
+            if not fn_rows:
+                try:
+                    safe_funcs = get_allowed_funcs()
+                    result = {"safe_funcs": safe_funcs, "allowed_fns": list(safe_funcs.keys())}
+                except Exception:
+                    result = {"safe_funcs": None, "allowed_fns": None}
+            else:
+                safe_funcs = _build_from_rows(fn_rows)
+                if not safe_funcs:
+                    result = {"safe_funcs": None, "allowed_fns": None}
+                else:
+                    result = {"safe_funcs": safe_funcs, "allowed_fns": list(safe_funcs.keys())}
 
-        if not fn_rows:
-            # DocType không có child table allowed_functions → fallback global
-            try:
-                safe_funcs = get_allowed_funcs()
-                return {"safe_funcs": safe_funcs, "allowed_fns": list(safe_funcs.keys())}
-            except Exception:
-                return {"safe_funcs": None, "allowed_fns": None}
+        except frappe.DoesNotExistError:
+            frappe.log_error(
+                f"_load_formula_set: DocType '{config_doctype}' name '{config_name}' không tồn tại",
+                "Formula Table API",
+            )
+            result = {"safe_funcs": None, "allowed_fns": None}
+        except Exception as e:
+            frappe.log_error(
+                f"_load_formula_set({config_doctype!r}, {config_name!r}): {e}",
+                "Formula Table API",
+            )
+            result = {"safe_funcs": None, "allowed_fns": None}
 
-        safe_funcs = _build_from_rows(fn_rows)
-        if not safe_funcs:
-            # Rows tồn tại nhưng tất cả bị disabled hoặc không map được
-            return {"safe_funcs": None, "allowed_fns": None}
+    # Lưu vào cache (chỉ cache kết quả hợp lệ)
+    if result and result.get("safe_funcs"):
+        if len(_fs_cache) >= _FS_CACHE_MAX:
+            oldest = next(iter(_fs_cache))
+            del _fs_cache[oldest]
+        _fs_cache[cache_key] = result
 
-        return {"safe_funcs": safe_funcs, "allowed_fns": list(safe_funcs.keys())}
-
-    except frappe.DoesNotExistError:
-        frappe.log_error(
-            f"_load_formula_set: DocType '{config_doctype}' name '{config_name}' không tồn tại",
-            "Formula Table API",
-        )
-        return {"safe_funcs": None, "allowed_fns": None}
-    except Exception as e:
-        frappe.log_error(
-            f"_load_formula_set({config_doctype!r}, {config_name!r}): {e}",
-            "Formula Table API",
-        )
-        return {"safe_funcs": None, "allowed_fns": None}
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -148,6 +173,11 @@ def _load_formula_set(config_doctype: str | None, config_name: str | None) -> di
 #    { result: any | null, error: str | null }
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Cache cho calc_cell engine — tránh compile lặp lại ────────────────────
+_cell_engine_cache: dict = {}
+_CELL_CACHE_MAX = 64
+
+
 @frappe.whitelist()
 def calc_cell(formula, context=None, config_doctype=None, config_name=None):
     formula  = (formula or "").strip()
@@ -158,12 +188,24 @@ def calc_cell(formula, context=None, config_doctype=None, config_name=None):
 
     cfg = _load_formula_set(config_doctype, config_name)
 
-    try:
+    # Cache engine theo (formula, frozenset(func_names))
+    func_key = frozenset(cfg["safe_funcs"].keys()) if cfg["safe_funcs"] else frozenset()
+    engine_key = (formula, func_key)
+
+    if engine_key in _cell_engine_cache:
+        engine = _cell_engine_cache[engine_key]
+    else:
+        if len(_cell_engine_cache) >= _CELL_CACHE_MAX:
+            oldest = next(iter(_cell_engine_cache))
+            del _cell_engine_cache[oldest]
         engine = FormulaEngine(
             formulas  = [{"name": "_cell", "formula": formula}],
             on_error  = MODE_NULL,
             safe_funcs= cfg["safe_funcs"],
         )
+        _cell_engine_cache[engine_key] = engine
+
+    try:
         res = engine.calculate(ctx)
         val = res.get("_cell")
 

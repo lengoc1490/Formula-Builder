@@ -531,6 +531,12 @@ def invalidate_suggestions_cache(doc=None, method=None,
             _invalidate_filter_context_cache()
         except Exception:
             pass
+        # Đồng bộ: xóa cache trong formula_table_api
+        try:
+            from formula_builder.api.formula_table_api import _invalidate_fs_cache
+            _invalidate_fs_cache()
+        except Exception:
+            pass
     except Exception:
         pass
     return {"ok":True}

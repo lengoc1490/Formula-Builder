@@ -70,3 +70,9 @@ def ensure_formula_builder_settings():
 
     except Exception as e:
         frappe.log_error(f"ensure_formula_builder_settings failed: {e}", "Formula Builder Patch")
+
+
+def execute():
+    """Frappe gọi hàm này khi chạy migrate. Thực thi tất cả patches."""
+    set_default_rate_limits()
+    ensure_formula_builder_settings()

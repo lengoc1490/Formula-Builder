@@ -4,5 +4,5 @@
 
 [post_model_sync]
 # Patches executed AFTER doctypes are migrated
-formula_builder.patches.v30_0_0.set_default_rate_limits
-formula_builder.patches.v30_0_0.ensure_formula_builder_settings
+# Mỗi dòng là một module path — Frappe gọi module.execute() nếu có
+formula_builder.patches.v30_0_0
