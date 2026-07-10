@@ -140,24 +140,20 @@ from .snapshot import (
     SnapshotManager,
 )
 
-# Version
-__version__ = "29.1.0"
-__engine_version__ = "29.1.0"
+# Version — unified across all modules (Phase 2.5)
+__version__ = "30.0.0"
+__engine_version__ = "30.0.0"
 __description__ = (
-    "Formula Engine v29.1 — v29.0 + bug fixes từ code review AlumGlass ERP. "
-    "FIXES v29.1: "
-    "FIX 5: _KNOWN_KWARGS false positive — các tên <= 3 ký tự (col, key, fmt, nth, sep, end, old, new) "
-    "bị nhầm là keyword arg khi xuất hiện trước '=' không có space trong normalize_formula(). "
-    "Ví dụ: IF(col='A', 1, 0) không được chuyển thành col=='A' → silent comparison bug. "
-    "Fix: thêm vào _PARAM_EXCLUDES, loại khỏi safety net known.update() và fallback frozenset. "
-    "FIX 6: validate_inputs() — InputIssue(fld=name) → InputIssue(field=name) (TypeError khi "
-    "required field thiếu, tương tự FIX 1 của explain_all). "
-    "Kế thừa v29.0: FormulaEngine full API, Enterprise Snapshot 5-layer, "
-    "IncrementalContext, AllocationEngine v19, TopoSort v2, TimeBucket v3, "
-    "SCC Linear Solver v29, 80+ BASE_FUNCS, threading.local op counter, "
-    "ALLOWED_ATTRS whitelist, normalize_formula 1-pass. "
-    "Kế thừa v28: FIX 1-4 (explain_all TypeError, calculate/recalculate_full budget guard, "
-    "op counter reset xuyên calls)."
+    "Formula Engine v30.0 — Phase 2: Architecture refactored. "
+    "api/formula_builder.py split into _helpers, _engine_cache, _ai_core modules. "
+    "Security: filter_expr validated via _validate_filter_expr() (AST sandbox). "
+    "AI: system prompt hardcoded + sanitize response. "
+    "Performance: engine LRU cache 128 entries. "
+    "Rate limit: removed for evaluate/validate, keep only for ai_suggest. "
+    "DataSource: BaseDataSourceHandler ABC added. "
+    "get_live_context: DB-side filter optimization. "
+    "Kế thừa v29.1: all FIX 5-6, 80+ BASE_FUNCS, IncrementalContext, "
+    "Enterprise Snapshot, AllocationEngine, SCC Linear Solver."
 )
 
 __all__ = [

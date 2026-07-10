@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 import json
 import importlib
+from abc import ABC, abstractmethod
 from collections import deque
 from typing import Any, Callable, Dict, List, Optional
 
@@ -21,6 +22,27 @@ import frappe
 
 # ── Registry storage ─────────────────────────────────────────────────────────
 _data_source_handlers: Dict[str, Callable] = {}
+
+
+# ── Abstract Base Class ──────────────────────────────────────────────────────
+
+class BaseDataSourceHandler(ABC):
+    """Abstract base cho tất cả data source handler.
+
+    Mỗi source_type phải implement:
+      - resolve(): resolve giá trị từ binding + document context
+      - validate_config(): validate source_config JSON (trả về error string hoặc None)
+    """
+
+    @abstractmethod
+    def resolve(self, binding: dict, doc, resolved_so_far: dict) -> Any:
+        """Resolve giá trị cho variable binding."""
+        ...
+
+    @abstractmethod
+    def validate_config(self, binding: dict) -> Optional[str]:
+        """Validate source_config. Trả về error message nếu invalid, None nếu OK."""
+        ...
 
 
 def register_source(source_type: str):

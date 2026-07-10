@@ -554,7 +554,7 @@ class FormulaEngine(FormulaEngineAudit):
                 meta_serial = None
 
         return {
-            "_cache_version": "v17",
+            "_cache_version": "v18",
             "_engine_hash": self._hash,
             "_engine_version": self.ENGINE_VERSION,
             "_python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
@@ -575,9 +575,9 @@ class FormulaEngine(FormulaEngineAudit):
     @classmethod
     def from_cache_dict(cls, d: Dict[str, Any], **override_kwargs) -> "FormulaEngine":
         cache_ver = d.get("_cache_version", "")
-        if cache_ver != "v17":
+        if cache_ver not in ("v17", "v18"):
             raise FormulaError(
-                f"Cache version '{cache_ver}' không tương thích với engine v17. "
+                f"Cache version '{cache_ver}' không tương thích với engine v18. "
                 "Hãy rebuild cache.",
                 code=ErrorCode.UNKNOWN,
             )

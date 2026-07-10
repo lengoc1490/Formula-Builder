@@ -16,212 +16,26 @@ from formula_builder.api.settings_cache import (
     invalidate_cache as _invalidate_settings_cache,
 )
 
-# ============================================================================
-# CONSTANTS & HELPERS (Bảo mật, Sanitize, Rate Limit, Cache)
-# ============================================================================
-
-_SAFE_VALUE_TYPES = (int, float, str, bool, type(None))
-_FORBIDDEN_FIELDS = frozenset({
-    "owner", "modified_by", "docstatus", "creation", "modified",
-    "name", "_liked_by", "_comments", "_assign", "_user_tags"
-})
-
-# ── AI System Prompt ────────────────────────────────────────────────────────
-_AI_SYSTEM_PROMPT = (
-    "You are a formula assistant for ERPNext Formula Builder. "
-    "Your ONLY job is to convert user requests into valid formula expressions "
-    "using the syntax and functions listed below.\n\n"
-    "RULES:\n"
-    "1. Output ONLY the raw formula expression — no markdown, no code blocks, no explanations.\n"
-    "2. Only use functions from the allowed list below. Do NOT invent new functions.\n"
-    "3. Use Python-like syntax: IF(cond, true_val, false_val), arithmetic (+, -, *, /), "
-    "comparisons (==, !=, <, >, <=, >=), and logical operators (and, or, not).\n"
-    "4. Variable names may appear as bare identifiers. Do NOT quote them.\n"
-    "5. Strings must use single quotes: 'hello', not \"hello\".\n"
-    "6. If the request is unclear, respond with: ERROR: [brief reason]\n"
-    "7. Max response length: 500 characters.\n\n"
+# ── Imports từ modules đã tách (Phase 2.1) ─────────────────────────────────
+from formula_builder.api._helpers import (
+    sanitize_frm_doc as _sanitize_frm_doc,
+    assert_read_perm as _assert_read_perm,
+    check_rate_limit as _check_rate_limit,
+    parse_scope as _scope,
+    parse_json as _json,
+    ok_response as _ok,
+    ev_response as _ev,
 )
-
-# Patterns để detect code blocks và dangerous content trong AI response
-_AI_CLEANUP_PATTERNS = [
-    (_re.compile(r'```[a-zA-Z]*\s*\n'), ''),   # ```python\n → remove
-    (_re.compile(r'\n```'),             ''),   # closing ``` → remove
-    (_re.compile(r'^```'),              ''),   # standalone ``` → remove
-    (_re.compile(r'^`|`$'),             ''),   # wrapping backticks → remove
-]
-
-# ── Helpers ────────────────────────────────────────────────────────────────
-def _sanitize_frm_doc(raw: dict, doctype: str) -> dict:
-    """Lọc frm_doc từ JS – chỉ giữ field có trong meta, loại system fields."""
-    if not doctype:
-        return {}
-    try:
-        meta = frappe.get_meta(doctype)
-        allowed_scalars = {
-            f.fieldname for f in meta.fields
-            if f.fieldtype not in ("Section Break", "Column Break", "Tab Break",
-                                   "Heading", "HTML", "Button", "Image",
-                                   "Attach", "Attach Image", "Barcode", "Signature")
-        }
-        allowed_tables = {
-            f.fieldname: f.options for f in meta.fields
-            if f.fieldtype in ("Table", "Table MultiSelect") and f.options
-        }
-    except Exception:
-        return {}
-
-    result = {}
-    for k, v in raw.items():
-        if k.startswith("__") or k in _FORBIDDEN_FIELDS:
-            continue
-        if k in allowed_scalars and isinstance(v, _SAFE_VALUE_TYPES):
-            result[k] = v
-        elif k in allowed_tables and isinstance(v, list):
-            child_doctype = allowed_tables[k]
-            try:
-                child_meta = frappe.get_meta(child_doctype)
-                child_allowed = {f.fieldname for f in child_meta.fields
-                                 if f.fieldtype not in ("Section Break", "Column Break", "Tab Break",
-                                                        "Heading", "HTML", "Button")}
-            except Exception:
-                child_allowed = set()
-            clean_rows = []
-            for row in v:
-                if not isinstance(row, dict):
-                    continue
-                clean_row = {
-                    rk: rv for rk, rv in row.items()
-                    if not rk.startswith("__")
-                    and rk not in _FORBIDDEN_FIELDS
-                    and (not child_allowed or rk in child_allowed or rk in ("idx", "name"))
-                    and isinstance(rv, _SAFE_VALUE_TYPES)
-                }
-                clean_rows.append(clean_row)
-            result[k] = clean_rows
-    return result
-
-def _assert_read_perm(doctype: str, docname: str):
-    """Kiểm tra quyền đọc document, throw PermissionError nếu không có."""
-    if not doctype or not docname or docname.startswith("new-"):
-        return
-    if not frappe.has_permission(doctype, "read", docname):
-        frappe.throw(
-            f"Không có quyền truy cập {doctype} {docname}",
-            frappe.PermissionError,
-        )
-
-def _check_rate_limit(action: str, limit: int = 10, window: int = 60):
-    """Kiểm tra rate limit — CHỈ dùng cho ai_suggest (gọi external API).
-
-    evaluate và validate KHÔNG bị rate limit vì:
-      - Đã có auth (@frappe.whitelist)
-      - Đã có AST sandbox + __builtins__={}
-      - Đã có budget guard (max_operations)
-      - Là thao tác tương tác của user, read-only, không side effect
-
-    Admin có thể tùy chỉnh limit trong Formula Builder Settings.
-    """
-    user = frappe.session.user or "Guest"
-    key = f"fb_rl:{user}:{action}"
-    try:
-        new_count = frappe.cache().incr(key, 1)
-        if new_count == 1:
-            frappe.cache().expire(key, window)
-
-        # Đọc limit từ Settings (fallback về giá trị truyền vào)
-        try:
-            setting_limit = frappe.db.get_single_value(
-                "Formula Builder Settings", f"rate_limit_{action}"
-            )
-            if setting_limit and setting_limit > 0:
-                limit = int(setting_limit)
-        except Exception:
-            pass
-
-        if new_count > limit:
-            frappe.throw(
-                f"⏳ Tạm dừng: đã vượt {limit} yêu cầu ({action}) "
-                f"trong {window}s. Vui lòng đợi giây lát rồi thử lại.",
-                frappe.TooManyRequestsError,
-            )
-    except frappe.TooManyRequestsError:
-        raise
-    except Exception:
-        pass
-
-# ── Settings ── now in api/settings_cache.py (single source of truth) ───────
-
-def _scope(s): return ScopeContext.from_dict(json.loads(s or "{}") if s else {})
-
-def _json(s):
-    try: 
-        return json.loads(s or "{}") or {}
-    except Exception: 
-        return {}
-
-def _ok(valid, msg, errors, warnings, markers, normalized=None, circular_detected=False):
-    """Trả response validate_formula — bổ sung normalized và circular_detected cho JS."""
-    return {
-        "valid":             valid,
-        "message":           msg,
-        "errors":            errors,
-        "warnings":          warnings,
-        "markers":           markers,
-        "normalized":        normalized,        # JS render chip "⇄ Đã chuẩn hóa"
-        "circular_detected": circular_detected, # JS render chip "↺ Vòng lặp tròn!"
-    }
-
-def _ev(success, result, error, explain, ctx_used, cross_ref, elapsed_ms=None):
-    """Trả response evaluate_formula — bổ sung elapsed_ms cho JS render ⏱."""
-    return {
-        "success":      success,
-        "result":       result,
-        "error":        error,
-        "explain":      explain,
-        "context_used": ctx_used,
-        "cross_ref":    cross_ref,
-        "elapsed_ms":   elapsed_ms,   # JS render: ⏱ ${r.elapsed_ms}ms
-    }
-
-
-# ── Engine Cache ───────────────────────────────────────────────────────────
-
-_ENGINE_CACHE: Dict[str, FormulaEngine] = {}
-_ENGINE_CACHE_MAX = 128
-
-
-def _engine_cache_key(formula: str, allowed_funcs: dict) -> str:
-    """Tạo cache key từ formula + fingerprint của allowed functions."""
-    import hashlib
-    formula_hash = hashlib.sha256(formula.encode("utf-8")).hexdigest()
-    func_names = ",".join(sorted(allowed_funcs.keys()))
-    func_hash = hashlib.sha256(func_names.encode("utf-8")).hexdigest()
-    return f"{formula_hash}:{func_hash}"
-
-
-def _get_or_create_engine(formula: str, allowed_funcs: dict) -> FormulaEngine:
-    """Lấy FormulaEngine từ cache hoặc tạo mới. Giới hạn 128 entries (LRU-style)."""
-    key = _engine_cache_key(formula, allowed_funcs)
-
-    if key in _ENGINE_CACHE:
-        return _ENGINE_CACHE[key]
-
-    # Evict oldest entry nếu cache đầy
-    if len(_ENGINE_CACHE) >= _ENGINE_CACHE_MAX:
-        oldest_key = next(iter(_ENGINE_CACHE))
-        del _ENGINE_CACHE[oldest_key]
-
-    engine = FormulaEngine(
-        formulas=[{"name": "__r__", "formula": formula}],
-        safe_funcs=allowed_funcs,
-    )
-    _ENGINE_CACHE[key] = engine
-    return engine
-
-
-def _invalidate_engine_cache() -> None:
-    """Xóa toàn bộ engine cache — gọi khi settings thay đổi."""
-    _ENGINE_CACHE.clear()
+from formula_builder.api._engine_cache import (
+    get_or_create_engine as _get_or_create_engine,
+    invalidate_engine_cache as _invalidate_engine_cache,
+)
+from formula_builder.api._ai_core import (
+    build_ai_system_prompt as _build_ai_system_prompt,
+    sanitize_ai_response as _sanitize_ai_response,
+    _smart_suggest_formula_impl,
+    _ai_suggest_formula_impl,
+)
 
 
 # ── SECTION 1: Suggestions ─────────────────────────────────────────────────
@@ -473,13 +287,19 @@ def get_live_context(scope_context_json):
         except Exception:
             target_field = ""
 
-        # ── 1. Fetch active bindings for this doctype/field ──
-        filters = {"is_active": 1}
-        bindings = []
+        # ── 1. Fetch active bindings — filter DB-side ──
+        # Chỉ lấy: global bindings (doctype="") HOẶC bindings cho doctype hiện tại
+        db_filters = [
+            ["is_active", "=", 1],
+        ]
+        if doctype:
+            db_filters.append(
+                ["applies_to_doctype", "in", ["", doctype]]
+            )
         try:
             all_bindings = frappe.get_all(
                 "Formula Variable Binding",
-                filters={"is_active": 1},
+                filters=db_filters,
                 fields=[
                     "name", "variable_name", "variable_label", "source_type",
                     "source_config", "resolve_priority", "applies_to_doctype",
@@ -490,16 +310,18 @@ def get_live_context(scope_context_json):
         except Exception:
             all_bindings = []
 
+        # Lọc applies_to_field trong Python (không thể filter hiệu quả trong DB)
+        bindings = []
         for b in all_bindings:
             b_doctype = b.get("applies_to_doctype") or ""
             b_field = b.get("applies_to_field") or ""
 
-            # Global bindings apply everywhere
+            # Global: applies everywhere
             if not b_doctype and not b_field:
                 bindings.append(b)
                 continue
-            # Doctype match
-            if b_doctype and b_doctype == doctype:
+            # Doctype-specific: lọc thêm theo field
+            if b_doctype == doctype:
                 if not b_field or b_field == target_field or not target_field:
                     bindings.append(b)
 
@@ -845,223 +667,20 @@ def _build_debug_info(formula: str, full_ctx: dict, allowed: dict) -> dict:
     return debug_info
 
 
-# ── AI Helpers ───────────────────────────────────────────────────────────────
-
-def _build_ai_system_prompt() -> str:
-    """Build system prompt từ Formula Builder Settings (single source of truth).
-
-    get_allowed_funcs() trả về:
-      - Có settings: các hàm admin đã enable
-      - Không có settings: toàn bộ BASE_FUNCS (~80+ hàm)
-    """
-    try:
-        allowed = get_allowed_funcs()
-    except Exception:
-        allowed = dict(BASE_FUNCS)
-    func_list = ", ".join(sorted(allowed.keys()))
-    return _AI_SYSTEM_PROMPT + f"ALLOWED FUNCTIONS: {func_list}"
-
-
-def _sanitize_ai_response(text: str) -> str:
-    """Clean AI response: strip markdown fences, trim, basic safety check.
-
-    NOTE: FormulaEngine.parse() + SecurityValidator là gatekeeper chính.
-    Hàm này chỉ làm sạch formatting, không chặn nội dung — engine sẽ reject
-    nếu công thức không hợp lệ hoặc chứa code nguy hiểm.
-    """
-    if not text:
-        return ""
-
-    # Strip markdown code fences (```python ... ```)
-    for pattern, replacement in _AI_CLEANUP_PATTERNS:
-        text = pattern.sub(replacement, text)
-
-    text = text.strip()
-
-    # Truncate at 500 chars
-    if len(text) > 500:
-        text = text[:500]
-
-    # Chỉ chặn các chuỗi rõ ràng là code injection — còn lại để engine validate
-    _hard_block = [
-        "__import__", "__class__", "__subclasses__", "__builtins__",
-        "__globals__", "__code__", "__dict__", "__bases__", "__mro__",
-    ]
-    for pattern in _hard_block:
-        if pattern in text:
-            return ""
-
-    # Cho phép tối đa 5 dòng (công thức IF lồng phức tạp có thể xuống dòng)
-    lines = [line for line in text.split("\n") if line.strip()]
-    if len(lines) > 5:
-        return ""
-
-    return text
-
-
 # ── SECTION 7: Smart Suggest ───────────────────────────────────────────────
 @frappe.whitelist()
 def smart_suggest_formula(doctype="", fieldname="", field_label="",
                            scope_context_json=None):
-    """
-    Gợi ý công thức thông minh dựa trên fieldname/label và context.
-    JS gọi: formula_builder.api.formula_builder.smart_suggest_formula
-    Trả về: { suggestions: [{label, formula, desc}] }
-    """
-    try:
-        ctx      = _scope(scope_context_json)
-        ctx.current_doctype = ctx.current_doctype or doctype or ""
-        resolver = VariableResolver()
-        full_ctx = resolver.build_full_context(ctx)
-
-        # Tìm các field phổ biến trong context
-        numeric_fields = [k for k, v in full_ctx.items()
-                          if isinstance(v, (int, float)) and not k.startswith("_")]
-
-        suggestions = []
-        label_lower = (field_label or fieldname or "").lower()
-
-        # ── Gợi ý theo tên field ──
-        if any(kw in label_lower for kw in ("amount","tiền","thành tiền","tổng tiền")):
-            if "qty" in full_ctx and "rate" in full_ctx:
-                suggestions.append({
-                    "label": "Thành tiền = SL × Đơn giá",
-                    "formula": "qty * rate",
-                    "desc": "Nhân số lượng với đơn giá"
-                })
-            if "qty" in full_ctx and "rate" in full_ctx:
-                suggestions.append({
-                    "label": "Thành tiền có VAT",
-                    "formula": "qty * rate * (1 + VAT_RATE)" if "VAT_RATE" in full_ctx else "qty * rate * 1.1",
-                    "desc": "Thành tiền bao gồm thuế VAT"
-                })
-
-        if any(kw in label_lower for kw in ("area","diện tích","s_","sqm")):
-            w_key = next((k for k in full_ctx if "width" in k or "rong" in k), None)
-            h_key = next((k for k in full_ctx if "height" in k or "cao" in k), None)
-            if w_key and h_key:
-                suggestions.append({
-                    "label": f"Diện tích ({w_key} × {h_key})",
-                    "formula": f"({w_key}/1000) * ({h_key}/1000)",
-                    "desc": "Diện tích m² từ kích thước mm"
-                })
-            suggestions.append({
-                "label": "Diện tích cửa (mm → m²)",
-                "formula": "(custom_width_mm/1000) * (custom_height_mm/1000)",
-                "desc": "Chiều rộng × chiều cao đổi sang m²"
-            })
-
-        if any(kw in label_lower for kw in ("qty","số lượng","sl","quantity")):
-            suggestions.append({
-                "label": "Làm tròn 2 chữ số",
-                "formula": "round(qty, 2)",
-                "desc": "Làm tròn số lượng"
-            })
-
-        if any(kw in label_lower for kw in ("price","đơn giá","rate","giá")):
-            suggestions.append({
-                "label": "Làm tròn đơn giá VNĐ",
-                "formula": "round(rate, -3)",
-                "desc": "Làm tròn đến hàng nghìn đồng"
-            })
-
-        # ── Gợi ý chung dựa trên context ──
-        if not suggestions:
-            if len(numeric_fields) >= 2:
-                a, b = numeric_fields[:2]
-                suggestions.append({
-                    "label": f"Tổng {a} + {b}",
-                    "formula": f"{a} + {b}",
-                    "desc": "Cộng hai trường số"
-                })
-                suggestions.append({
-                    "label": f"Tích {a} × {b}",
-                    "formula": f"{a} * {b}",
-                    "desc": "Nhân hai trường số"
-                })
-                suggestions.append({
-                    "label": f"Chia an toàn {a} / {b}",
-                    "formula": f"safe_div({a}, {b}, 0)",
-                    "desc": "Chia với mặc định 0 nếu chia cho 0"
-                })
-            else:
-                # Fallback: gợi ý snippet chung
-                suggestions = [
-                    {"label": "Điều kiện IF",         "formula": "IF(điều_kiện, giá_trị_đúng, giá_trị_sai)", "desc": "Rẽ nhánh theo điều kiện"},
-                    {"label": "Chia an toàn",         "formula": "safe_div(tử_số, mẫu_số, 0)",              "desc": "Tránh lỗi chia cho 0"},
-                    {"label": "Tham chiếu dòng khác", "formula": "items.line_ref.qty",                       "desc": "Lấy giá trị từ dòng khác"},
-                ]
-
-        return {"suggestions": suggestions[:5]}
-
-    except Exception as e:
-        frappe.log_error(f"smart_suggest_formula error: {e}", "Formula Builder")
-        return {"suggestions": []}
+    """Gợi ý công thức thông minh — delegate sang _ai_core module."""
+    return _smart_suggest_formula_impl(doctype, fieldname, field_label,
+                                        scope_context_json)
 
 
 @frappe.whitelist()
 def ai_suggest_formula(prompt):
-    """Proxy call tới Anthropic API với system prompt bảo mật — key chỉ ở server.
+    """Proxy call tới Anthropic API — delegate sang _ai_core module."""
+    return _ai_suggest_formula_impl(prompt)
 
-    Prompt được gửi trong system message để ngăn prompt injection.
-    Response được sanitize để chỉ trả về công thức thuần.
-    """
-    _check_rate_limit("ai_suggest")
-
-    # Validate input
-    user_text = str(prompt).strip() if prompt else ""
-    if not user_text:
-        return {"text": ""}
-    if len(user_text) > 2000:
-        return {"text": ""}
-
-    try:
-        import anthropic
-        api_key = frappe.conf.get("anthropic_api_key") or frappe.get_site_config().get("anthropic_api_key")
-        if not api_key:
-            frappe.log_error("anthropic_api_key chưa cấu hình", "Formula Builder AI")
-            return {"text": ""}
-
-        client = anthropic.Anthropic(api_key=api_key)
-        settings = frappe.get_single("Formula Builder Settings")
-        system_prompt = _build_ai_system_prompt()
-
-        msg = client.messages.create(
-            model=settings.ai_model or "claude-3-5-sonnet-20241022",
-            max_tokens=600,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_text}],
-        )
-
-        raw_text = msg.content[0].text if msg.content else ""
-        sanitized = _sanitize_ai_response(raw_text)
-
-        if sanitized:
-            # Validate formula syntax với get_allowed_funcs() (single source of truth)
-            try:
-                allowed = get_allowed_funcs()
-                FormulaEngine(
-                    formulas=[{"name": "__ai__", "formula": sanitized}],
-                    safe_funcs=allowed,
-                )
-            except (FormulaError, FormulaValidationError) as e:
-                frappe.log_error(
-                    f"AI suggested invalid formula rejected: {sanitized} | Error: {e}",
-                    "Formula Builder AI",
-                )
-                return {"text": ""}
-            except Exception:
-                pass
-
-        return {"text": sanitized}
-
-    except ImportError:
-        frappe.log_error("Thiếu thư viện anthropic: pip install anthropic", "Formula Builder AI")
-        return {"text": ""}
-    except Exception as e:
-        frappe.log_error(f"ai_suggest_formula: {e}", "Formula Builder AI")
-        return {"text": ""}
-    
 # ── SECTION 8: Seed ────────────────────────────────────────────────────────
 @frappe.whitelist()
 def seed_default_functions():

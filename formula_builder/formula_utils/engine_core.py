@@ -156,7 +156,7 @@ class IncrementalContext:
 # ----------------------------------------------------------------------
 
 class FormulaEngineCore:
-    ENGINE_VERSION = "28.0.0"  # v28
+    ENGINE_VERSION = "30.0.0"  # unified v30 (Phase 2.5)
 
     def __init__(
         self,
