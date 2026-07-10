@@ -210,7 +210,7 @@ app_include_js = [
 
 # Request Events
 # ----------------
-# before_request = ["formula_builder.utils.before_request"]
+before_request = ["formula_builder.api._logging.set_correlation_id"]
 # after_request = ["formula_builder.utils.after_request"]
 
 # Job Events

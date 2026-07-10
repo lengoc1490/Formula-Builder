@@ -39,7 +39,7 @@ class TimeBucket:
 Trả về **dict có cấu trúc** — dùng khi cần truy cập từng loại riêng.
 
 ```python
-from engine_v17 import FormulaEngine
+from formula_builder.formula_utils import FormulaEngine
 
 engine = FormulaEngine(formulas=[...])
 

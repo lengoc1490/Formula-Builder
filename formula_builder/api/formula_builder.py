@@ -36,6 +36,7 @@ from formula_builder.api._ai_core import (
     _smart_suggest_formula_impl,
     _ai_suggest_formula_impl,
 )
+from formula_builder.api._logging import timed
 
 
 # ── SECTION 1: Suggestions ─────────────────────────────────────────────────
@@ -82,6 +83,7 @@ def get_doctype_fields(doctype):
 
 
 # ── SECTION 2: Validate ────────────────────────────────────────────────────
+@timed("validate_formula")
 @frappe.whitelist()
 def validate_formula(formula, scope_context_json=None):
     errors, warnings, markers = [], [], []
@@ -165,6 +167,7 @@ def validate_formula(formula, scope_context_json=None):
 
 
 # ── SECTION 3: Evaluate ────────────────────────────────────────────────────
+@timed("evaluate_formula")
 @frappe.whitelist()
 def evaluate_formula(
     formula, scope_context_json=None,

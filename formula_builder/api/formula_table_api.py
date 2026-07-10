@@ -31,6 +31,7 @@ from formula_builder.formula_utils import (
 )
 from formula_builder.api.settings_cache import get_allowed_funcs
 from formula_builder.api._helpers import parse_json as _parse
+from formula_builder.api._logging import timed
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -178,6 +179,7 @@ _cell_engine_cache: dict = {}
 _CELL_CACHE_MAX = 64
 
 
+@timed("calc_cell")
 @frappe.whitelist()
 def calc_cell(formula, context=None, config_doctype=None, config_name=None):
     formula  = (formula or "").strip()
@@ -261,6 +263,7 @@ def calc_cell(formula, context=None, config_doctype=None, config_name=None):
 #    Nếu tất cả hàng dùng cùng công thức → engine tái sử dụng (cache nhỏ).
 # ─────────────────────────────────────────────────────────────────────────────
 
+@timed("calc_table")
 @frappe.whitelist()
 def calc_table(rows, columns, globals=None, topo_order=None,
                config_doctype=None, config_name=None, parent_doc=None):
