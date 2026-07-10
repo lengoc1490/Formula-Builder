@@ -83,8 +83,8 @@ def get_doctype_fields(doctype):
 
 
 # ── SECTION 2: Validate ────────────────────────────────────────────────────
-@timed("validate_formula")
 @frappe.whitelist()
+@timed("validate_formula")
 def validate_formula(formula, scope_context_json=None):
     errors, warnings, markers = [], [], []
     circular_detected = False
@@ -167,8 +167,8 @@ def validate_formula(formula, scope_context_json=None):
 
 
 # ── SECTION 3: Evaluate ────────────────────────────────────────────────────
-@timed("evaluate_formula")
 @frappe.whitelist()
+@timed("evaluate_formula")
 def evaluate_formula(
     formula, scope_context_json=None,
     extra_context_json=None,

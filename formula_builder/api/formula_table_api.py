@@ -179,8 +179,8 @@ _cell_engine_cache: dict = {}
 _CELL_CACHE_MAX = 64
 
 
-@timed("calc_cell")
 @frappe.whitelist()
+@timed("calc_cell")
 def calc_cell(formula, context=None, config_doctype=None, config_name=None):
     formula  = (formula or "").strip()
     ctx      = _parse(context) or {}
@@ -263,8 +263,8 @@ def calc_cell(formula, context=None, config_doctype=None, config_name=None):
 #    Nếu tất cả hàng dùng cùng công thức → engine tái sử dụng (cache nhỏ).
 # ─────────────────────────────────────────────────────────────────────────────
 
-@timed("calc_table")
 @frappe.whitelist()
+@timed("calc_table")
 def calc_table(rows, columns, globals=None, topo_order=None,
                config_doctype=None, config_name=None, parent_doc=None):
 

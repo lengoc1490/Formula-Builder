@@ -21,6 +21,7 @@ Usage:
 
 from __future__ import annotations
 
+import functools
 import json
 import time
 import uuid
@@ -198,8 +199,14 @@ def timed(action: str):
         @timed("evaluate_formula")
         def evaluate_formula(...):
             ...
+
+    LƯU Ý: Khi dùng chung với @frappe.whitelist(), PHẢI đặt
+    @frappe.whitelist() ở NGOÀI cùng (trên @timed) để wrapper
+    được đăng ký vào whitelist. Xem thêm: frappe/__init__.py::whitelist()
     """
+
     def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
         def wrapper(*args, **kwargs):
             t0 = time.monotonic()
             try:
@@ -220,7 +227,7 @@ def timed(action: str):
                     error_type=type(e).__name__,
                 )
                 raise
-        wrapper.__name__ = func.__name__
-        wrapper.__doc__ = func.__doc__
+
         return wrapper
+
     return decorator
