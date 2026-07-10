@@ -110,7 +110,17 @@ def _assert_read_perm(doctype: str, docname: str):
             frappe.PermissionError,
         )
 
-def _check_rate_limit(action: str, limit: int = 30, window: int = 60):
+def _check_rate_limit(action: str, limit: int = 120, window: int = 60):
+    """Kiểm tra rate limit cho action. Đọc limit từ Formula Builder Settings.
+
+    Mặc định cao hơn trước đây để hỗ trợ người dùng tương tác liên tục
+    khi edit công thức trong BOM/cost template nhiều dòng:
+      - validate: 120/min (2 req/s)
+      - evaluate: 120/min (2 req/s)
+      - ai_suggest: 10/min
+
+    Admin có thể tùy chỉnh trong Formula Builder Settings.
+    """
     user = frappe.session.user or "Guest"
     key = f"fb_rl:{user}:{action}"
     try:
@@ -118,9 +128,22 @@ def _check_rate_limit(action: str, limit: int = 30, window: int = 60):
         new_count = frappe.cache().incr(key, 1)
         if new_count == 1:
             frappe.cache().expire(key, window)
+
+        # Đọc limit từ Settings (fallback về giá trị truyền vào)
+        try:
+            setting_limit = frappe.db.get_single_value(
+                "Formula Builder Settings", f"rate_limit_{action}"
+            )
+            if setting_limit and setting_limit > 0:
+                limit = int(setting_limit)
+        except Exception:
+            pass
+
         if new_count > limit:
+            retry_after = window  # giây
             frappe.throw(
-                f"Quá nhiều yêu cầu ({action}). Thử lại sau {window}s.",
+                f"⏳ Tạm dừng: đã vượt {limit} yêu cầu ({action}) "
+                f"trong {window}s. Vui lòng đợi giây lát rồi thử lại.",
                 frappe.TooManyRequestsError,
             )
     except frappe.TooManyRequestsError:
@@ -262,7 +285,7 @@ def validate_formula(formula, scope_context_json=None):
             pass
 
     # Rate limit
-    _check_rate_limit("validate", limit=40, window=60)
+    _check_rate_limit("validate")
 
     if not formula or not formula.strip():
         return _ok(False, "Công thức trống", ["Không được để trống"], [], [])
@@ -349,7 +372,7 @@ def evaluate_formula(
         # Permission check
         _assert_read_perm(ctx.current_doctype, ctx.current_docname)
         # Rate limit
-        _check_rate_limit("evaluate", limit=20, window=60)
+        _check_rate_limit("evaluate")
 
         extra = _json(extra_context_json)
         resolver = VariableResolver()
@@ -990,7 +1013,7 @@ def ai_suggest_formula(prompt):
     Prompt được gửi trong system message để ngăn prompt injection.
     Response được sanitize để chỉ trả về công thức thuần.
     """
-    _check_rate_limit("ai_suggest", limit=5, window=60)
+    _check_rate_limit("ai_suggest")
 
     # Validate input
     user_text = str(prompt).strip() if prompt else ""

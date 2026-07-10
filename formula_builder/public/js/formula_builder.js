@@ -1408,8 +1408,15 @@ class AluglassFormulaEditor {
       }
     } catch(e) {
       if (this._destroyed) return;
-      this._setPanelContent("result", `<div class="afb-result-err">✗ ${_esc(String(e))}</div>`);
-      this._setStatus("✗ Lỗi kết nối","err");
+      const errMsg = String(e);
+      // Rate limit: hiển thị thông báo thân thiện
+      if (errMsg.includes("TooManyRequests") || errMsg.includes("Tạm dừng") || errMsg.includes("Quá nhiều")) {
+        this._setPanelContent("result", `<div class="afb-result-warn">⏳ ${_esc(errMsg.replace(/^.*?:/,'').trim())||"Vui lòng đợi giây lát rồi thử lại."}</div>`);
+        this._setStatus("⏳ Tạm dừng","warn");
+      } else {
+        this._setPanelContent("result", `<div class="afb-result-err">✗ ${_esc(errMsg)}</div>`);
+        this._setStatus("✗ Lỗi","err");
+      }
     } finally { this._testRunning = false; }
   }
 

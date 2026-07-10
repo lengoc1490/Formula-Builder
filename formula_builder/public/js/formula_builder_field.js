@@ -726,10 +726,15 @@ async function _runPreview(formula, scopeFn, previewEl, valBar) {
       valEl.className   = "afb-fp-preview-val error";
       if (valBar) valBar.innerHTML = `<span style="color:#ef4444">✗ ${_esc(r?.error || "Lỗi")}</span>`;
     }
-  } catch {
+  } catch(e) {
     valEl.textContent = "—";
     valEl.className   = "afb-fp-preview-val";
-    if (valBar) valBar.innerHTML = `<span style="color:#ef4444">✗ Lỗi kết nối</span>`;
+    const errMsg = String(e||"");
+    if (errMsg.includes("TooManyRequests") || errMsg.includes("Tạm dừng") || errMsg.includes("Quá nhiều")) {
+      if (valBar) valBar.innerHTML = `<span style="color:#f59e0b">⏳ Tạm dừng — đợi giây lát</span>`;
+    } else {
+      if (valBar) valBar.innerHTML = `<span style="color:#ef4444">✗ Lỗi kết nối</span>`;
+    }
   }
 }
 
