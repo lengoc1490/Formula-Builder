@@ -110,21 +110,20 @@ def _assert_read_perm(doctype: str, docname: str):
             frappe.PermissionError,
         )
 
-def _check_rate_limit(action: str, limit: int = 120, window: int = 60):
-    """Kiểm tra rate limit cho action. Đọc limit từ Formula Builder Settings.
+def _check_rate_limit(action: str, limit: int = 10, window: int = 60):
+    """Kiểm tra rate limit — CHỈ dùng cho ai_suggest (gọi external API).
 
-    Mặc định cao hơn trước đây để hỗ trợ người dùng tương tác liên tục
-    khi edit công thức trong BOM/cost template nhiều dòng:
-      - validate: 120/min (2 req/s)
-      - evaluate: 120/min (2 req/s)
-      - ai_suggest: 10/min
+    evaluate và validate KHÔNG bị rate limit vì:
+      - Đã có auth (@frappe.whitelist)
+      - Đã có AST sandbox + __builtins__={}
+      - Đã có budget guard (max_operations)
+      - Là thao tác tương tác của user, read-only, không side effect
 
-    Admin có thể tùy chỉnh trong Formula Builder Settings.
+    Admin có thể tùy chỉnh limit trong Formula Builder Settings.
     """
     user = frappe.session.user or "Guest"
     key = f"fb_rl:{user}:{action}"
     try:
-        # Dùng incr trả về giá trị mới atomic
         new_count = frappe.cache().incr(key, 1)
         if new_count == 1:
             frappe.cache().expire(key, window)
@@ -140,7 +139,6 @@ def _check_rate_limit(action: str, limit: int = 120, window: int = 60):
             pass
 
         if new_count > limit:
-            retry_after = window  # giây
             frappe.throw(
                 f"⏳ Tạm dừng: đã vượt {limit} yêu cầu ({action}) "
                 f"trong {window}s. Vui lòng đợi giây lát rồi thử lại.",
@@ -284,9 +282,6 @@ def validate_formula(formula, scope_context_json=None):
         except Exception:
             pass
 
-    # Rate limit
-    _check_rate_limit("validate")
-
     if not formula or not formula.strip():
         return _ok(False, "Công thức trống", ["Không được để trống"], [], [])
     formula = formula.strip()
@@ -371,8 +366,6 @@ def evaluate_formula(
         ctx = _scope(scope_context_json)
         # Permission check
         _assert_read_perm(ctx.current_doctype, ctx.current_docname)
-        # Rate limit
-        _check_rate_limit("evaluate")
 
         extra = _json(extra_context_json)
         resolver = VariableResolver()
