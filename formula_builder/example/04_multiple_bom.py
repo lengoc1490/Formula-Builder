@@ -1,9 +1,6 @@
-# test_100k_products_with_bom_levels_fixed.py
-# ĐÃ SỬA: chạy 100k sản phẩm, bổ sung trace + audit, in truy xét đẹp như dự toán (bảng chi tiết, tổng TT/CPC/DG, tree lineage)
-# from engine_final import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
-# from engine_v2 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
-# from engine_v10 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
-from engine_v28 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
+# test_100k_products_with_bom_levels_fixed.py — Ví dụ BOM đa cấp 100k sản phẩm
+# Cách chạy: python3 04_multiple_bom.py
+from formula_builder.formula_utils import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
 import random
 import time
 from collections import defaultdict

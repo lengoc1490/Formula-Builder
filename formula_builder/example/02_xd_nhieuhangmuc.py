@@ -1,10 +1,6 @@
-# du_toan_xd_grouping_multi_template_full_print.py
-# ĐÃ FIX: chạy 100.000 dự án, có trace + audit mẫu, in bảng đúng
-# from engine_final import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
-# from engine_v2 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
-# from engine_v3 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
-# from engine_v10 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
-from engine_v28 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
+# du_toan_xd_grouping_multi_template_full_print.py — Ví dụ dự toán xây dựng nhiều hạng mục
+# Cách chạy: python3 02_xd_nhieuhangmuc.py
+from formula_builder.formula_utils import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
 import random
 import time
 import sys

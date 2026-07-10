@@ -1,13 +1,6 @@
-# gia_thanh_san_xuat_complex.py
-# Ví dụ full tính giá thành sản xuất phức tạp (kế toán giá thành) với nhiều thành phần chi phí
-# In cách tính toán và kết quả chi tiết như tính giá xây dựng (bảng đẹp, tổng TT, CPC, VAT, DG, ...)
-# Bổ sung trace + audit tương tự
-# from engine_final import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
-# from engine_v2 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
-# from engine_v3 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
-# from engine_v4 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
-# from engine_v10 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
-from engine_v28 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
+# gia_thanh_san_xuat_complex.py — Ví dụ tính giá thành sản xuất phức tạp
+# Cách chạy: python3 03_giathanh.py
+from formula_builder.formula_utils import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
 import random
 import time
 import sys

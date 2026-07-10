@@ -29,23 +29,13 @@ from formula_builder.formula_utils import (
     FormulaValidationError,
     MODE_NULL,
 )
+from formula_builder.api.settings_cache import get_allowed_funcs
+from formula_builder.api._helpers import parse_json as _parse
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  §0  INTERNAL HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _parse(raw):
-    """Frappe whitelist truyền dict/list qua string JSON — parse an toàn."""
-    if raw is None:
-        return None
-    if isinstance(raw, (dict, list)):
-        return raw
-    try:
-        return frappe.parse_json(raw)
-    except Exception:
-        return json.loads(raw)
-
 
 def _is_formula_error(val) -> bool:
     """Kiểm tra giá trị trả về từ FormulaEngine.calculate() có phải lỗi."""
@@ -104,7 +94,6 @@ def _load_formula_set(config_doctype: str | None, config_name: str | None) -> di
     # ── Không có config → dùng Formula Builder Settings global ──────────────
     if not (config_doctype and config_name):
         try:
-            from formula_builder.api.settings_cache import get_allowed_funcs
             safe_funcs = get_allowed_funcs()
             return {"safe_funcs": safe_funcs, "allowed_fns": list(safe_funcs.keys())}
         except Exception:
@@ -116,10 +105,8 @@ def _load_formula_set(config_doctype: str | None, config_name: str | None) -> di
         fn_rows = doc.get("allowed_functions") or []
 
         if not fn_rows:
-            # DocType không có child table allowed_functions
-            # → fallback về global settings
+            # DocType không có child table allowed_functions → fallback global
             try:
-                from formula_builder.api.settings_cache import get_allowed_funcs
                 safe_funcs = get_allowed_funcs()
                 return {"safe_funcs": safe_funcs, "allowed_fns": list(safe_funcs.keys())}
             except Exception:

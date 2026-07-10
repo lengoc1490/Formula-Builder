@@ -29,17 +29,17 @@ app_license = "mit"
 # app_include_js = "/assets/formula_builder/js/formula_builder.js"
 
 app_include_css = [
-    "/assets/formula_builder/css/formula_builder_vars.css?v=1.0.34",
-    "/assets/formula_builder/css/formula_builder_monaco.css?v=1.0.39",
-    "/assets/formula_builder/css/formula_builder.css?v=1.0.34",
-    "/assets/formula_builder/css/formula_builder_field.css?v=1.0.39",
-    "/assets/formula_builder/css/formula_builder_dialog.css?v=1.0.34",
+    "/assets/formula_builder/css/formula_builder_vars.css?v=30.0.0",
+    "/assets/formula_builder/css/formula_builder_monaco.css?v=30.0.0",
+    "/assets/formula_builder/css/formula_builder.css?v=30.0.0",
+    "/assets/formula_builder/css/formula_builder_field.css?v=30.0.0",
+    "/assets/formula_builder/css/formula_builder_dialog.css?v=30.0.0",
 ]
 
 app_include_js = [
-    "/assets/formula_builder/js/formula_builder.js?v=1.0.51",
-    "/assets/formula_builder/js/formula_builder_field.js?v=1.0.53",
-    "/assets/formula_builder/js/formula_builder_dialog.js?v=1.0.51",
+    "/assets/formula_builder/js/formula_builder.js?v=30.0.0",
+    "/assets/formula_builder/js/formula_builder_field.js?v=30.0.0",
+    "/assets/formula_builder/js/formula_builder_dialog.js?v=30.0.0",
 ]
 
 # include js, css files in header of web template

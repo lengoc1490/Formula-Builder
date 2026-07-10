@@ -1,10 +1,6 @@
-# payroll_calculation.py (đã bổ sung trace + audit)
-# from engine_final import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
-# from engine_v2 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
-# from engine_v4 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
-# from engine_v5 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
-# from engine_v10 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
-from engine_v28 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
+# payroll_calculation.py — Ví dụ tính lương với trace + audit
+# Cách chạy: python3 01_luong.py
+from formula_builder.formula_utils import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
 import random
 import time
 import sys

@@ -10,8 +10,8 @@ from collections import defaultdict
 import json
 import uuid
 
-# Giả sử bạn đã có file engine_v4.py chứa các class sau:
-from engine_v4 import FormulaEngineAudit, FormulaError
+# Import từ formula_utils package
+from formula_builder.formula_utils import FormulaEngineAudit, FormulaError
 
 # ────────────────────────────────────────────────────────────────────────────
 # 1. Định nghĩa công thức (BOM đơn giản)
