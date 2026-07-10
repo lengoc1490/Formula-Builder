@@ -1,4 +1,4 @@
-from engine_v28 import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
+from formula_builder.formula_utils import FormulaEngineCore, FormulaEngineTrace, FormulaEngineAudit
 import random
 import time
 from collections import defaultdict

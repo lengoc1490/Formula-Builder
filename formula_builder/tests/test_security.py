@@ -152,8 +152,13 @@ class TestFormulaValidator(FrappeTestCase):
         self.assertFalse(r.ok)
 
     def test_blocks_assignment(self):
-        r = self.validator.validate("x = 5")
-        self.assertFalse(r.ok)
+        # x = 5 sau normalize → x == 5 (comparison hợp lệ)
+        # Dùng walrus operator := để test chặn assignment
+        r1 = self.validator.validate("(x := 5)")
+        self.assertFalse(r1.ok)
+
+        r2 = self.validator.validate("(x = 5)")
+        self.assertFalse(r2.ok)
 
     def test_blocks_import(self):
         r = self.validator.validate("__import__('os').system('ls')")

@@ -238,15 +238,17 @@ class TestBudgetGuard(FrappeTestCase):
     """Test operation budget limiting."""
 
     def test_budget_exceeded(self):
+        # Budget reset MỖI LẦN calculate() → cần nhiều ops trong 1 call
         engine = FormulaEngine(
-            formulas=[{"name": "a", "formula": "x + 1"}],
+            formulas=[
+                {"name": "a", "formula": "x + 1"},
+                {"name": "b", "formula": "a + 1"},
+                {"name": "c", "formula": "b + 1"},
+                {"name": "d", "formula": "c + 1"},
+            ],
             safe_funcs=BASE_FUNCS,
-            max_operations=3,
+            max_operations=3,  # Chỉ cho phép 3 ops → sẽ exceed ở formula thứ 4
         )
-        # calculate() gọi consume_op cho mỗi formula node (=1 call here)
-        # Nên cần 3 calls
-        for _ in range(3):
-            engine.calculate({"x": 1})
         with self.assertRaises(FormulaBudgetExceeded):
             engine.calculate({"x": 1})
 

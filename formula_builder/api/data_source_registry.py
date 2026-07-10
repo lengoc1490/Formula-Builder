@@ -600,12 +600,18 @@ def _get_dependency_graph(bindings: List[dict]) -> Dict[str, set]:
 
 
 def _topological_sort(graph: Dict[str, set]) -> List[str]:
-    """Kahn's algorithm. Raises ValueError on cycle."""
-    in_degree = {node: 0 for node in graph}
+    """Kahn's algorithm. graph: node → set of its dependencies.
+
+    Raises ValueError on cycle.
+    """
+    # Build reverse graph: node → who depends on it
+    reverse: Dict[str, set] = {n: set() for n in graph}
     for node, deps in graph.items():
         for dep in deps:
-            in_degree[dep] = in_degree.get(dep, 0)
-            in_degree[node] = in_degree.get(node, 0) + 1
+            reverse[dep].add(node)
+
+    # in_degree = số dependencies chưa được resolve
+    in_degree = {node: len(deps) for node, deps in graph.items()}
 
     queue = deque([n for n, d in in_degree.items() if d == 0])
     result = []
@@ -613,10 +619,11 @@ def _topological_sort(graph: Dict[str, set]) -> List[str]:
     while queue:
         node = queue.popleft()
         result.append(node)
-        for dep in graph.get(node, set()):
-            in_degree[dep] -= 1
-            if in_degree[dep] == 0:
-                queue.append(dep)
+        # Node đã resolve → giảm in_degree của tất cả nodes phụ thuộc vào nó
+        for dependent in reverse.get(node, set()):
+            in_degree[dependent] -= 1
+            if in_degree[dependent] == 0:
+                queue.append(dependent)
 
     if len(result) != len(graph):
         remaining = sorted(n for n, d in in_degree.items() if d > 0)
