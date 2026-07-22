@@ -37,9 +37,9 @@ app_include_css = [
 ]
 
 app_include_js = [
-    "/assets/formula_builder/js/formula_builder.js?v=30.0.0",
-    "/assets/formula_builder/js/formula_builder_field.js?v=30.0.0",
-    "/assets/formula_builder/js/formula_builder_dialog.js?v=30.0.0",
+    "/assets/formula_builder/js/formula_builder.js?v=30.0.1",
+    "/assets/formula_builder/js/formula_builder_field.js?v=30.0.1",
+    "/assets/formula_builder/js/formula_builder_dialog.js?v=30.0.1",
 ]
 
 # include js, css files in header of web template

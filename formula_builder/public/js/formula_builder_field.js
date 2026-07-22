@@ -77,6 +77,29 @@ window._afbPatchedEditors = window._afbPatchedEditors || {};
 const _patchedEditors = window._afbPatchedEditors;
 
 // ── Helpers chung ─────────────────────────────────────────────────────────────
+/**
+ * Lấy tên field dùng làm slug cho 1 child table.
+ * Ưu tiên: id_field từ initGridField > "custom_slug" > "line_ref" > "slug"
+ */
+function _getSlugField(frm, tblField) {
+  const key = `${frm?.doctype}::${tblField}`;
+  const configured = window._afbSlugFieldMap?.[key];
+  if (configured) return configured;
+  return "line_ref";  // default fallback
+}
+
+/**
+ * Lấy giá trị slug từ 1 row dựa trên slug field đã cấu hình.
+ */
+function _getSlugValue(row, slugField) {
+  if (!row || !slugField) return null;
+  // Nếu slugField là "line_ref" (default) mà row không có line_ref → thử các field slug khác
+  const val = row[slugField];
+  if (val) return val;
+  // Fallback: thử custom_slug, slug, line_ref theo thứ tự
+  return row.custom_slug || row.slug || row.line_ref || null;
+}
+
 function _getFrmDocJsonForScope(scope) {
   // Delegate to shared serializer in formula_builder.js (§9)
   if (typeof formula_builder?.formula?._serializeDoc === "function") {
@@ -478,7 +501,11 @@ function _buildContext({ frm, childTableField, cdn }) {
       const rowCount   = rows.length || 1;
       for (let idx = 0; idx < Math.min(rowCount, 30); idx++) {
         const row = rows[idx] || {};
+        // ── Slug: dùng field được cấu hình (id_field) hoặc fallback ──
+        const slugField = _getSlugField(frm, tblField);
+        const slug = _getSlugValue(row, slugField);
         cfNames.forEach(cf => {
+          // Index-based item (giữ nguyên)
           siblingItems.push({
             name    : `${tblField}[${idx}].${cf.fieldname}`,
             label   : `${cf.label || cf.fieldname} — hàng ${idx + 1}`,
@@ -491,6 +518,22 @@ function _buildContext({ frm, childTableField, cdn }) {
             rowIdx  : idx,
             rowName : row.name,
           });
+          // Slug-based item (mới): tableName.slug.field
+          if (slug) {
+            siblingItems.push({
+              name    : `${tblField}.${slug}.${cf.fieldname}`,
+              label   : `${cf.label || cf.fieldname} — ${slug}`,
+              fieldtype: cf.fieldtype,
+              doctype : tblDoctype,
+              source  : tblField === childTableField ? "current_table" : "sibling_table",
+              value   : row[cf.fieldname],
+              insert  : `${tblField}.${slug}.${cf.fieldname}`,
+              tableName: tblField,
+              rowIdx  : idx,
+              rowName : row.name,
+              slug    : slug,
+            });
+          }
         });
       }
     });
@@ -537,6 +580,23 @@ function _buildCompletionHandler(editorRef, contextFn) {
       }));
       return { suggestions: items };
     }
+    // TRIGGER (NEW): `tableName.slug.` → fields của dòng có slug đó
+    const tblSlugDotMatch = lineBefore.match(/(\w+)\.(\w+)\.$/);
+    if (tblSlugDotMatch) {
+      const tblName = tblSlugDotMatch[1];
+      const slugVal = tblSlugDotMatch[2];
+      const matches = ctx.siblingItems.filter(s => s.tableName === tblName && s.slug === slugVal);
+      if (matches.length) {
+        matches.forEach(s => add({
+          label: s.name.split(".").pop(), kind: MK.Field,
+          insertText: s.name.split(".").pop(),
+          detail: `${s.fieldtype} · ${slugVal}${s.value != null ? " · " + String(s.value) : ""}`,
+          documentation: `**${s.name}**\n\nGiá trị: \`${s.value ?? "null"}\`\nDoctype: ${s.doctype}`,
+          sortText: "0s_" + s.name,
+        }));
+        return { suggestions: items };
+      }
+    }
     const tblIdxMatch = lineBefore.match(/(\w+)\[$/);
     if (tblIdxMatch) {
       const tblName = tblIdxMatch[1];
@@ -546,6 +606,19 @@ function _buildCompletionHandler(editorRef, contextFn) {
       return { suggestions: items };
     }
     if (lineBefore.match(/\b\w+\.$/)) {
+      // Nếu là child table → gợi ý slugs trước
+      const dotMatch = lineBefore.match(/\b(\w+)\.$/);
+      if (dotMatch) {
+        const tblName = dotMatch[1];
+        const tblSlugs = [...new Set(
+          ctx.siblingItems.filter(s => s.tableName === tblName && s.slug).map(s => s.slug)
+        )];
+        tblSlugs.forEach(slug => add({
+          label: slug, kind: MK.Value, insertText: slug,
+          detail: `🔖 Slug — ${tblName}`,
+          sortText: "0slug_" + slug,
+        }));
+      }
       ctx.allItems.forEach(s => add({
         label: s.name, kind: MK.Field, insertText: s.insert,
         detail: `${s.fieldtype||""} · ${s.doctype||""}`,
@@ -1227,6 +1300,13 @@ formula_builder.formula.initGridField = function(frm, gridField, fieldname, opts
         float_width : "480px", // ← chiều rộng popup nổi
         float_height: "160px", // ← chiều cao popup nổi
     }, opts);
+
+    // ── Slug field registry: lưu mapping doctype::childTableField → slug_field ─
+    window._afbSlugFieldMap = window._afbSlugFieldMap || {};
+    const _slugField = cfg.id_field || null;
+    if (_slugField) {
+        window._afbSlugFieldMap[`${frm.doctype}::${gridField}`] = _slugField;
+    }
 
     const childDoctype = (() => {
         const meta = frappe.get_meta(frm.doctype);

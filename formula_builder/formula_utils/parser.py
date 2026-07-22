@@ -3,6 +3,7 @@
 
 import ast
 import re
+import sys
 from typing import Dict, Any, Optional, Set
 
 from .errors import FormulaError, ErrorCode
@@ -14,15 +15,24 @@ class DotToSubscriptTransformer(ast.NodeTransformer):
     ALLOWED_ATTRS = frozenset({'get', 'keys', 'values', 'items', 'to_dict'})
 
     def visit_Attribute(self, node):
-        if node.attr not in self.ALLOWED_ATTRS:
-            new_node = ast.Subscript(
-                value=self.visit(node.value),
-                slice=ast.Index(value=ast.Constant(value=node.attr)),
-                ctx=ast.Load()
-            )
-            return new_node
-        return self.generic_visit(node)
-    
+        # Nếu attr nằm trong danh sách cho phép, giữ nguyên
+        if node.attr in self.ALLOWED_ATTRS:
+            return self.generic_visit(node)
+
+        # Python version compatibility
+        if sys.version_info >= (3, 9):
+            slice_node = ast.Constant(value=node.attr)
+        else:
+            slice_node = ast.Index(value=ast.Constant(value=node.attr))
+
+        new_node = ast.Subscript(
+            value=self.visit(node.value),
+            slice=slice_node,
+            ctx=ast.Load()
+        )
+
+        return ast.copy_location(new_node, node)
+
     
 class IfCallRewriter(ast.NodeTransformer):
     """Rewrite IF(cond, true, false) to (true if cond else false)"""

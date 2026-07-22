@@ -412,7 +412,12 @@ const _ContextBuilder = {
           const rowCount = rows.length || 1;
           for (let idx = 0; idx < Math.min(rowCount, 30); idx++) {
             const row = rows[idx] || {};
+            // ── Slug: dùng field được cấu hình (id_field) hoặc fallback ──
+            const slugKey = `${frm?.doctype}::${tblField}`;
+            const slugField = window._afbSlugFieldMap?.[slugKey] || "line_ref";
+            const slug = (row[slugField]) || row.custom_slug || row.slug || row.line_ref || null;
             cfNames.forEach(cf => {
+              // Index-based item (giữ nguyên)
               siblingItems.push({
                 name:      `${tblField}[${idx}].${cf.fieldname}`,
                 label:     `${cf.label || cf.fieldname} — hàng ${idx + 1}`,
@@ -425,6 +430,22 @@ const _ContextBuilder = {
                 rowIdx:    idx,
                 rowName:   row.name,
               });
+              // Slug-based item (mới): tableName.slug.field
+              if (slug) {
+                siblingItems.push({
+                  name:      `${tblField}.${slug}.${cf.fieldname}`,
+                  label:     `${cf.label || cf.fieldname} — ${slug}`,
+                  fieldtype: cf.fieldtype,
+                  doctype:   tblDoctype,
+                  source:    tblField === childTableField ? "current_table" : "sibling_table",
+                  value:     row[cf.fieldname],
+                  insert:    `${tblField}.${slug}.${cf.fieldname}`,
+                  tableName: tblField,
+                  rowIdx:    idx,
+                  rowName:   row.name,
+                  slug:      slug,
+                });
+              }
             });
           }
         });
@@ -531,9 +552,41 @@ function _buildCompletionHandler(editorRef, contextFn) {
       return { suggestions: items };
     }
 
-    // TRIGGER: `word.` → child fields
+    // TRIGGER (NEW): `tableName.slug.` → fields của dòng có slug đó
+    const tblSlugDotMatch = lineBefore.match(/(\w+)\.(\w+)\.$/);
+    if (tblSlugDotMatch) {
+      const tblName = tblSlugDotMatch[1];
+      const slugVal = tblSlugDotMatch[2];
+      const matches = ctx.siblingItems.filter(s => s.tableName === tblName && s.slug === slugVal);
+      if (matches.length) {
+        matches.forEach(s => add({
+          label: s.name.split(".").pop(),
+          kind: MK.Field,
+          insertText: s.name.split(".").pop(),
+          detail: `${s.fieldtype} · ${s.doctype} · ${slugVal}`,
+          documentation: _buildVarDoc(s),
+          sortText: "0s_" + s.name,
+        }));
+        return { suggestions: items };
+      }
+    }
+
+    // TRIGGER: `tableName.` → slugs + all items
     const plainDotMatch = lineBefore.match(/(\w+)\.$/);
     if (plainDotMatch) {
+      const tblName = plainDotMatch[1];
+      // Nếu là child table → gợi ý slugs trước
+      const tblSlugs = [...new Set(
+        ctx.siblingItems.filter(s => s.tableName === tblName && s.slug).map(s => s.slug)
+      )];
+      tblSlugs.forEach(slug => add({
+        label: slug,
+        kind: MK.Value,
+        insertText: slug,
+        detail: `🔖 Slug — ${tblName}`,
+        sortText: "0slug_" + slug,
+      }));
+      // Sau đó gợi ý tất cả items
       ctx.allItems.forEach(s => add({
         label: s.name,
         kind: MK.Field,

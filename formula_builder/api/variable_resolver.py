@@ -10,6 +10,68 @@ from formula_builder.formula_utils import FormulaEngine, BASE_FUNCS
 from formula_builder.api.settings_cache import get_allowed_funcs
 
 
+# ── ChildTableRows: list-like wrapper cho phép index bằng cả int và slug ────
+class ChildTableRows:
+    """
+    Wrapper cho child table rows, hỗ trợ:
+      - items[0]           → row dict tại index (int)
+      - items['canh_trai'] → row dict tìm theo slug (str)
+      - items.canh_trai    → row dict (attribute access, nhờ DotToSubscriptTransformer)
+      - for r in items     → iteration
+      - len(items)         → số lượng rows
+    """
+    def __init__(self, rows, slug_fields=None):
+        self._rows = rows
+        self._slug_map = {}
+        if slug_fields is None:
+            # Tự động phát hiện: custom_slug → line_ref → field đuôi _slug → slug
+            slug_fields = ["custom_slug", "line_ref"]
+            if rows and isinstance(rows[0], dict):
+                for k in rows[0]:
+                    if k not in slug_fields and (k.endswith("_slug") or k == "slug"):
+                        slug_fields.append(k)
+        for row in rows:
+            for sf in slug_fields:
+                val = row.get(sf) if isinstance(row, dict) else None
+                if val is not None:
+                    self._slug_map[str(val)] = row
+                    break  # 1 row chỉ có 1 slug duy nhất, tìm thấy là thoát
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._rows[key]
+        if isinstance(key, str):
+            # 1. Slug lookup
+            row = self._slug_map.get(key)
+            if row is not None:
+                return row
+            # 2. Integer string fallback
+            try:
+                return self._rows[int(key)]
+            except (ValueError, IndexError):
+                raise KeyError(f"Row not found by slug or index: {key}")
+        raise TypeError(f"ChildTableRows: unsupported key type {type(key).__name__}")
+
+    def __len__(self):
+        return len(self._rows)
+
+    def __iter__(self):
+        return iter(self._rows)
+
+    def __contains__(self, item):
+        return item in self._rows
+
+    def __repr__(self):
+        return f"<ChildTableRows({len(self._rows)} rows)>"
+
+    def get(self, key, default=None):
+        """Dict-like get, hỗ trợ items.get('slug', default)."""
+        try:
+            return self[key]
+        except (KeyError, IndexError, TypeError):
+            return default
+
+
 def _get_allowed_db_query_doctypes() -> set:
     """Lấy danh sách doctype được phép từ Formula Builder Settings."""
     try:
@@ -224,12 +286,29 @@ class VariableResolver:
 
     # ── Child table ────────────────────────────────────────────────────────
     def _get_child_by_lineref(self, doctype, docname, child_field, line_ref, field, ctx):
+        """Tìm row theo slug/line_ref. 1 vòng lặp duy nhất, tìm thấy là trả về ngay."""
         doc = ctx.get_doc(doctype, docname)
-        if not doc: 
+        if not doc:
             return None
+        # Tự động phát hiện slug fields: custom_slug → line_ref → *_slug → slug
+        meta = ctx.get_meta(doc.doctype)
+        child_meta = None
+        if meta:
+            for f in meta.fields:
+                if f.fieldname == child_field and f.options:
+                    child_meta = ctx.get_meta(f.options)
+                    break
+        SLUG_FIELDS = ["line_ref", "custom_slug"]
+        if child_meta:
+            for cf in child_meta.fields:
+                fn = cf.fieldname
+                if fn not in SLUG_FIELDS and (fn.endswith("_slug") or fn == "slug"):
+                    SLUG_FIELDS.append(fn)
         for row in (doc.get(child_field) or []):
-            if getattr(row, "line_ref", None) == line_ref: 
-                return getattr(row, field, None)
+            for sf in SLUG_FIELDS:
+                v = getattr(row, sf, None)
+                if v is not None and str(v) == line_ref:
+                    return getattr(row, field, None)
         return None
 
     def _get_child_by_index(self, doctype, docname, child_field, idx, field, ctx):
@@ -435,8 +514,8 @@ class VariableResolver:
                         "VariableResolver"
                     )
 
-            # Inject vào context: context['items'] = [...]
-            context[table_field] = rows_data
+            # Inject vào context dưới dạng ChildTableRows (hỗ trợ cả index và slug)
+            context[table_field] = ChildTableRows(rows_data)
 
 
     # ── Cross-ref DAG engine ───────────────────────────────────────────────
@@ -458,19 +537,23 @@ class VariableResolver:
                 rows = (doc.get(ctx.child_table_field) or []) if doc else []
                 for row in rows:
                     lr = getattr(row, "line_ref", None)
-                    if not lr: 
+                    slug = getattr(row, "custom_slug", None)
+                    if not lr and not slug:
                         continue
-                    # Đưa fields của dòng vào inputs với prefix lr__
+                    # Đưa fields của dòng vào inputs với prefix lr__ và slug__
                     for k, v in row.as_dict().items():
                         if v is not None and not k.startswith("_"):
-                            inputs[f"{lr}__{k}"] = v
+                            if lr:
+                                inputs[f"{lr}__{k}"] = v
+                            if slug and str(slug) != str(lr):
+                                inputs[f"{str(slug)}__{k}"] = v
                     # Thu thập công thức dòng
                     for ff in formula_fields:
                         expr = getattr(row, ff, None)
                         if expr and str(expr).strip():
                             norm = self._normalize(str(expr), ctx.child_table_field, rows)
                             formulas.append({
-                                "name":    f"{lr}__{ff.replace('_formula','')}",
+                                "name":    f"{lr or slug}__{ff.replace('_formula','')}",
                                 "formula": norm,
                             })
             except Exception as e:
