@@ -17,6 +17,26 @@ from formula_builder.flexible_formula_engine import (
     build_inputs_from_frappe_doc,
 )
 from formula_builder.api.variable_resolver import VariableResolver, ScopeContext
+from formula_builder.api.batch_binding_resolver import (
+    BatchBindingResolver,
+    resolve_all_bindings_batch,
+    _apply_transform,
+)
+from formula_builder.api.data_source_registry import (
+    batchable,
+    is_batchable,
+    get_batch_resolver,
+)
+from formula_builder.api.source_type_registry import (
+    SourceTypeRegistry,
+    SourceTypeDefinition,
+    register_source,
+    list_source_types,
+    get_source_type_schema,
+    validate_binding_source_config as _validate_binding_source_config,
+    get_registry_stats,
+    test_data_source,
+)
 
 
 class FrappeERPNextAdapter(ERPNextAdapter):
@@ -53,4 +73,12 @@ __all__ = [
     "FlexibleFormulaEngine", "EngineConfig", "ChildTableConfig",
     "FrappeERPNextAdapter", "CalculationResult",
     "build_inputs_from_frappe_doc", "VariableResolver", "ScopeContext",
+    # Batch resolver (v30.1)
+    "BatchBindingResolver", "resolve_all_bindings_batch",
+    "batchable", "is_batchable", "get_batch_resolver",
+    # Source Type Registry (v31 Phase 1)
+    "SourceTypeRegistry", "SourceTypeDefinition", "register_source",
+    "list_source_types", "get_source_type_schema",
+    "validate_binding_source_config", "get_registry_stats",
+    "test_data_source",
 ]
