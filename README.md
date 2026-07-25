@@ -115,7 +115,7 @@
 
 **Đặc điểm nổi bật:**
 - **Zero hardcode** — Mọi business rule, công thức, hệ số được lưu trong DocTypes
-- **Excel-like formula syntax** — Cú pháp quen thuộc: `IF()`, `SUMIF()`, `VLOOKUP()`, `XLOOKUP()`, tham chiếu chéo `items[0].qty`
+- **Excel-like formula syntax** — Cú pháp quen thuộc: `IF()`, `SUMIF()`, `VLOOKUP()`, `XLOOKUP()`, tham chiếu chéo `items[0].qty` hoặc `<child_table>.<slug>.<field>`
 - **DAG-based dependency resolution** — Tự động sắp xếp thứ tự tính toán theo đồ thị phụ thuộc
 - **Incremental calculation** — Chỉ tính lại các node bị ảnh hưởng khi input thay đổi
 - **Multi-table engine** — Hỗ trợ tính toán đồng thời nhiều child table + global formulas trong một DAG
