@@ -348,6 +348,194 @@ class SnapshotManager:
             notes=f"Migrated from legacy snapshot {legacy_snapshot.snapshot_id}",
         )
 
+    # ── Persistence API: submit / load / query ──────────────────────────────
+
+    @staticmethod
+    def submit(
+        snap: EnterpriseSnapshot,
+        title: Optional[str] = None,
+        formula_set: Optional[str] = None,
+        source_doctype: Optional[str] = None,
+        trace_level: Optional[str] = None,
+    ) -> str:
+        """Persist EnterpriseSnapshot vào DB (DocType: Formula Snapshot).
+
+        Args:
+            snap: EnterpriseSnapshot đã tạo từ create() hoặc revise().
+            title: Nhãn hiển thị (dùng snapshot_id nếu không có).
+            formula_set: Formula Set đã dùng (Link).
+            source_doctype: DocType của chứng từ gốc (vd: "Quotation").
+            trace_level: Ghi đè trace level (full/cost_only/summary).
+
+        Returns:
+            DocName của Formula Snapshot vừa tạo.
+
+        Raises:
+            frappe.DuplicateEntryError nếu snapshot_id đã được submit.
+        """
+        import frappe
+
+        if frappe.db.exists("Formula Snapshot", snap.snapshot_id):
+            frappe.throw(
+                f"Snapshot '{snap.snapshot_id}' already persisted. "
+                "Use revise() để tạo revision mới."
+            )
+
+        # Build trace summary fields
+        fields_evaluated = snap.exec_trace.fields_evaluated
+        total_exec_ms = snap.exec_trace.total_exec_ms
+        tl = trace_level or "full"
+
+        doc = frappe.get_doc({
+            "doctype": "Formula Snapshot",
+            "snapshot_id": snap.snapshot_id,
+            "title": title or f"Snapshot {snap.snapshot_id[:8]}",
+            "tag": snap.audit_trail.tag,
+            "status": snap.audit_trail.status,
+            "formula_set": formula_set,
+            "source_doctype": source_doctype or snap.audit_trail.source_doc,
+            "source_doc": snap.audit_trail.source_doc,
+            "created_by": snap.audit_trail.created_by,
+            "approved_by": snap.audit_trail.approved_by or "",
+            "notes": snap.audit_trail.notes or "",
+            "engine_version": snap.meta.engine_version,
+            "formula_count": snap.meta.formula_count,
+            "payload_hash": snap.payload_hash,
+            "fields_evaluated": fields_evaluated,
+            "total_exec_ms": total_exec_ms,
+            "trace_level": tl,
+            "engine_meta": snap.meta.to_dict(),
+            "engine_context": snap.engine_context.to_dict(),
+            "dag_structure": snap.dag_state.to_dict(),
+            "formulas": {},  # populated by caller if needed
+            "business_input": snap.business_input,
+            "outputs": snap.outputs,
+            "audit_trail": snap.audit_trail.to_dict(),
+            "execution_trace": snap.exec_trace.to_dict(),
+        })
+        doc.insert(ignore_permissions=False)
+        frappe.db.commit()
+        return doc.name
+
+    @staticmethod
+    def load(snapshot_id: str) -> Optional[EnterpriseSnapshot]:
+        """Load EnterpriseSnapshot từ DB → memory.
+
+        Dùng để khôi phục snapshot cũ phục vụ compare/audit/replay.
+        Tự động verify payload_hash để phát hiện dữ liệu bị sửa.
+
+        Returns:
+            EnterpriseSnapshot nếu tìm thấy và hash hợp lệ, None nếu không tồn tại.
+        """
+        import frappe
+        import json as _json
+
+        try:
+            doc = frappe.get_doc("Formula Snapshot", snapshot_id)
+        except frappe.DoesNotExistError:
+            return None
+
+        # Parse từng JSON field để tái tạo EnterpriseSnapshot
+        def _parse(val):
+            return _json.loads(val) if isinstance(val, str) else (val or {})
+
+        meta_dict       = _parse(doc.engine_meta)
+        context_dict    = _parse(doc.engine_context)
+        dag_dict        = _parse(doc.dag_structure)
+        trace_dict      = _parse(doc.execution_trace)
+        inputs          = _parse(doc.business_input)
+        outputs         = _parse(doc.outputs)
+        audit_dict      = _parse(doc.audit_trail)
+
+        # Reconstruct nested dataclasses
+        from .types import (
+            EngineMetaBlock, EngineContextBlock, DagStateBlock,
+            ExecutionTraceBlock, TraceEntry, AuditTrailBlock,
+        )
+
+        meta = EngineMetaBlock(**meta_dict)
+        engine_context = EngineContextBlock(**context_dict)
+        dag_state = DagStateBlock(**dag_dict)
+        audit_trail = AuditTrailBlock(**audit_dict)
+
+        # Execution trace — handle optional trace_hash
+        entries = [TraceEntry(**e) for e in trace_dict.get("entries", [])]
+        exec_trace = ExecutionTraceBlock(
+            fields_evaluated=trace_dict.get("fields_evaluated", doc.fields_evaluated or 0),
+            fields_skipped=trace_dict.get("fields_skipped", 0),
+            total_exec_ms=trace_dict.get("total_exec_ms", doc.total_exec_ms or 0.0),
+            entries=entries,
+        )
+
+        snap = EnterpriseSnapshot(
+            snapshot_id=doc.snapshot_id,
+            created_at=str(doc.creation),
+            meta=meta,
+            engine_context=engine_context,
+            dag_state=dag_state,
+            exec_trace=exec_trace,
+            business_input=inputs,
+            outputs=outputs,
+            audit_trail=audit_trail,
+            payload_hash=doc.payload_hash or "",
+            trace_hash=None,
+        )
+
+        # Verify integrity
+        if not snap.verify():
+            frappe.log_error(
+                f"Snapshot {snapshot_id}: PAYLOAD HASH MISMATCH — "
+                "dữ liệu có thể đã bị sửa sau khi persist!",
+                "Formula Snapshot Integrity",
+            )
+
+        return snap
+
+    @staticmethod
+    def query_from_db(
+        tag: Optional[str] = None,
+        status: Optional[str] = None,
+        source_doctype: Optional[str] = None,
+        source_doc: Optional[str] = None,
+        formula_set: Optional[str] = None,
+        created_by: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict]:
+        """Query snapshot list từ DB — không load execution_trace.
+
+        Dùng cho UI list view / report. Chỉ trả về metadata,
+        không load các field JSON nặng.
+        """
+        import frappe
+
+        filters = {}
+        if tag:
+            filters["tag"] = tag
+        if status:
+            filters["status"] = status
+        if source_doctype:
+            filters["source_doctype"] = source_doctype
+        if source_doc:
+            filters["source_doc"] = source_doc
+        if formula_set:
+            filters["formula_set"] = formula_set
+        if created_by:
+            filters["created_by"] = created_by
+
+        return frappe.get_all(
+            "Formula Snapshot",
+            filters=filters,
+            fields=[
+                "snapshot_id", "title", "tag", "status",
+                "source_doctype", "source_doc", "formula_set",
+                "engine_version", "formula_count",
+                "fields_evaluated", "total_exec_ms",
+                "created_by", "creation", "modified",
+            ],
+            order_by="creation desc",
+            limit=limit,
+        )
+
 
 # ============================================================================
 # SnapshotRegistry

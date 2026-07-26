@@ -1,0 +1,260 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "field:snapshot_id",
+ "creation": "2026-07-26 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "section_identifiers",
+  "snapshot_id",
+  "title",
+  "column_break_1",
+  "tag",
+  "status",
+  "section_reference",
+  "formula_set",
+  "source_doctype",
+  "source_doc",
+  "column_break_2",
+  "created_by",
+  "approved_by",
+  "notes",
+  "section_engine",
+  "engine_version",
+  "formula_count",
+  "payload_hash",
+  "column_break_3",
+  "fields_evaluated",
+  "total_exec_ms",
+  "trace_level",
+  "section_data",
+  "engine_meta",
+  "engine_context",
+  "dag_structure",
+  "formulas",
+  "business_input",
+  "outputs",
+  "audit_trail",
+  "section_trace",
+  "execution_trace"
+ ],
+ "fields": [
+  {
+   "fieldname": "section_identifiers",
+   "fieldtype": "Section Break",
+   "label": "Identifiers"
+  },
+  {
+   "fieldname": "snapshot_id",
+   "fieldtype": "Data",
+   "label": "Snapshot ID",
+   "reqd": 1,
+   "unique": 1,
+   "length": 64
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "label": "Title",
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "tag",
+   "fieldtype": "Select",
+   "label": "Tag",
+   "options": "estimate\nplan\nactual\nvariance\nvoid",
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "draft\nlocked\napproved\nrejected\narchived",
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "section_reference",
+   "fieldtype": "Section Break",
+   "label": "Reference"
+  },
+  {
+   "fieldname": "formula_set",
+   "fieldtype": "Link",
+   "label": "Formula Set",
+   "options": "Formula Set",
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "source_doctype",
+   "fieldtype": "Link",
+   "label": "Source DocType",
+   "options": "DocType"
+  },
+  {
+   "fieldname": "source_doc",
+   "fieldtype": "Data",
+   "label": "Source Document",
+   "in_standard_filter": 1,
+   "length": 255
+  },
+  {
+   "fieldname": "column_break_2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "created_by",
+   "fieldtype": "Data",
+   "label": "Created By",
+   "length": 255
+  },
+  {
+   "fieldname": "approved_by",
+   "fieldtype": "Data",
+   "label": "Approved By",
+   "length": 255
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  },
+  {
+   "fieldname": "section_engine",
+   "fieldtype": "Section Break",
+   "label": "Engine Summary"
+  },
+  {
+   "fieldname": "engine_version",
+   "fieldtype": "Data",
+   "label": "Engine Version",
+   "length": 32
+  },
+  {
+   "fieldname": "formula_count",
+   "fieldtype": "Int",
+   "label": "Formula Count"
+  },
+  {
+   "fieldname": "payload_hash",
+   "fieldtype": "Data",
+   "label": "Payload Hash",
+   "length": 128,
+   "description": "SHA-256 của meta + dag_state + inputs + outputs"
+  },
+  {
+   "fieldname": "column_break_3",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "fields_evaluated",
+   "fieldtype": "Int",
+   "label": "Fields Evaluated"
+  },
+  {
+   "fieldname": "total_exec_ms",
+   "fieldtype": "Float",
+   "label": "Total Exec (ms)"
+  },
+  {
+   "fieldname": "trace_level",
+   "fieldtype": "Select",
+   "label": "Trace Level",
+   "options": "full\ncost_only\nsummary",
+   "default": "full"
+  },
+  {
+   "fieldname": "section_data",
+   "fieldtype": "Section Break",
+   "label": "Snapshot Data (JSON)"
+  },
+  {
+   "fieldname": "engine_meta",
+   "fieldtype": "JSON",
+   "label": "Engine Metadata",
+   "description": "Engine version, formula hash, schema hash, frozen mode, captured_at"
+  },
+  {
+   "fieldname": "engine_context",
+   "fieldtype": "JSON",
+   "label": "Engine Context",
+   "description": "DAG version, input/output keys, rounding policy, error mode"
+  },
+  {
+   "fieldname": "dag_structure",
+   "fieldtype": "JSON",
+   "label": "DAG Structure",
+   "description": "Execution order, dependency edges, reverse edges, input nodes, formula nodes"
+  },
+  {
+   "fieldname": "formulas",
+   "fieldtype": "JSON",
+   "label": "Formulas",
+   "description": "Full formula dictionary used in this evaluation"
+  },
+  {
+   "fieldname": "business_input",
+   "fieldtype": "JSON",
+   "label": "Business Input",
+   "description": "All input values at evaluation time"
+  },
+  {
+   "fieldname": "outputs",
+   "fieldtype": "JSON",
+   "label": "Outputs",
+   "description": "All computed output values"
+  },
+  {
+   "fieldname": "audit_trail",
+   "fieldtype": "JSON",
+   "label": "Audit Trail",
+   "description": "Tag, status, created_by, approved_by, revision_chain, notes, source_doc"
+  },
+  {
+   "fieldname": "section_trace",
+   "fieldtype": "Section Break",
+   "label": "Execution Trace"
+  },
+  {
+   "fieldname": "execution_trace",
+   "fieldtype": "JSON",
+   "label": "Execution Trace",
+   "description": "Full step-by-step evaluation trace: field, formula, old_value, new_value, dep_values, exec_time_ms"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-07-26 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Formula Builder",
+ "name": "Formula Snapshot",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0,
+ "track_seen": 0,
+ "track_views": 0
+}

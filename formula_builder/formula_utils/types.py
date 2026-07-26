@@ -37,6 +37,13 @@ class SnapshotStatus(str, Enum):
     ARCHIVED = "archived"   # Lưu trữ
 
 
+class TraceLevel(str, Enum):
+    """Chiến lược lưu execution trace — kiểm soát dung lượng snapshot."""
+    FULL      = "full"       # Trace tất cả các biến (BOM + Cost + intermediate)
+    COST_ONLY = "cost_only"  # Chỉ trace các biến quan trọng (pattern: GIA_, TONG_, NC_, OH_, VL_, PROFIT, VAT)
+    SUMMARY   = "summary"    # Chỉ lưu fields_evaluated + total_exec_ms, không lưu trace entries
+
+
 # ============================================================================
 # Explain & Validation
 # ============================================================================
@@ -565,6 +572,31 @@ class EnterpriseSnapshot:
             lines.append(f"  Source Doc   : {t.source_doc}")
         lines.append("=" * 72)
         return "\n".join(lines)
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "EnterpriseSnapshot":
+        """Tái tạo EnterpriseSnapshot từ dict (vd: load từ DB JSON).
+
+        Dùng khi load snapshot đã persist để compare/audit.
+        """
+        return cls(
+            snapshot_id=data["snapshot_id"],
+            created_at=data["created_at"],
+            meta=EngineMetaBlock(**data["meta"]),
+            engine_context=EngineContextBlock(**data["engine_context"]),
+            dag_state=DagStateBlock(**data["dag_state"]),
+            exec_trace=ExecutionTraceBlock(
+                fields_evaluated=data["exec_trace"]["fields_evaluated"],
+                fields_skipped=data["exec_trace"]["fields_skipped"],
+                total_exec_ms=data["exec_trace"]["total_exec_ms"],
+                entries=[TraceEntry(**e) for e in data["exec_trace"].get("entries", [])],
+            ),
+            business_input=data.get("business_input", {}),
+            outputs=data.get("outputs", {}),
+            audit_trail=AuditTrailBlock(**data["audit_trail"]),
+            payload_hash=data.get("payload_hash", ""),
+            trace_hash=data.get("trace_hash"),
+        )
 
 
 # ============================================================================

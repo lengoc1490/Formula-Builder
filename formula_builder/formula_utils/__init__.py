@@ -20,6 +20,7 @@ from .types import (
     AuditLevel,
     SnapshotTag,
     SnapshotStatus,
+    TraceLevel,
     ExplainStep,
     ExplainResult,
     InputIssue,
@@ -173,6 +174,7 @@ __all__ = [
     "AuditLevel",
     "SnapshotTag",
     "SnapshotStatus",
+    "TraceLevel",
     # Dataclasses
     "ExplainStep",
     "ExplainResult",
