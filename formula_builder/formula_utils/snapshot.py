@@ -125,7 +125,12 @@ def _snap_build_dag_state(
 # ============================================================================
 
 class SnapshotManager:
-    """Create, compare, and manage EnterpriseSnapshots."""
+    """Create, compare, and manage EnterpriseSnapshots.
+
+    ⚠️  Lưu ý: SnapshotRegistry hiện là IN-MEMORY ONLY.
+    Snapshot tạo ra sẽ mất khi restart process.
+    Để audit trail production-ready, cần DocType backing.
+    """
 
     @staticmethod
     def create_snapshot(
@@ -349,7 +354,18 @@ class SnapshotManager:
 # ============================================================================
 
 class SnapshotRegistry:
-    """Registry for storing and querying EnterpriseSnapshots."""
+    """Registry for storing and querying EnterpriseSnapshots.
+
+    ⚠️  IN-MEMORY ONLY — không persist vào DB.
+    Dữ liệu sẽ MẤT khi restart worker/process.
+    Không chia sẻ được giữa các gunicorn worker (Frappe production multi-worker).
+    KHÔNG dùng cho compliance audit thực sự.
+
+    Để audit trail production-ready, cần thêm DocType backing
+    (vd: "Formula Snapshot" DocType lưu EnterpriseSnapshot.to_dict()).
+
+    Hiện tại phù hợp cho: debug, development, testing.
+    """
 
     def __init__(self):
         self._store: Dict[str, EnterpriseSnapshot] = {}

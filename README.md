@@ -2,7 +2,7 @@
 
 **Generic Excel-like formula engine and builder for Frappe Framework**
 
-> Version: **31.0.0** | License: MIT | Author: Lê Ngọc
+> Version: **30.0.0** | License: MIT | Author: Lê Ngọc
 
 ---
 
@@ -153,7 +153,7 @@
 | **SCC Linear Solver** | Gaussian elimination + iterative fallback | `formula_utils/scc_linear.py` |
 | **Time Bucket** | Year/Half/Quarter/Month/Week buckets | `formula_utils/time_bucket.py` |
 | **AI Suggestions** | Anthropic/Deepseek/ChatGPT integration | `api/formula_builder.py` |
-| **Rate Limiting** | Redis-based atomic rate limiting per user/action | `api/formula_builder.py` |
+| **Budget Guard** | max_operations cap on engine evaluation (thay rate limit) | `api/formula_builder.py` |
 | **Caching** | Redis cache cho suggestions, settings, context | `api/settings_cache.py` |
 
 ---
@@ -262,7 +262,7 @@ formula_builder/
 │   ├── flexible_formula_engine.py       # Multi-table ERP engine + ERPNextAdapter ABC
 │   ├── integration.py                   # Public integration surface + FrappeERPNextAdapter
 │   │
-│   ├── formula_utils/                   # ⭐ Core Formula Engine v29.1.0
+│   ├── formula_utils/                   # ⭐ Core Formula Engine v30.0.0
 │   │   ├── __init__.py                  # Public API exports (~110+ names)
 │   │   ├── engine_core.py              # FormulaEngineCore + IncrementalContext
 │   │   ├── engine_trace.py             # FormulaEngineTrace
@@ -350,9 +350,9 @@ formula_builder/
 |---|---|---|---|
 | `title` | Data | — | Display title |
 | `max_formula_length` | Int | 2000 | Max characters per formula |
-| `rate_limit_validate` | Int | 40 | Validate rate limit (req/min) |
-| `rate_limit_evaluate` | Int | 20 | Evaluate rate limit (req/min) |
-| `rate_limit_ai` | Int | 5 | AI suggest rate limit (req/min) |
+| `rate_limit_validate` | Int | 40 | ⚠️ DEPRECATED v30: evaluate/validate không còn rate limit (đã có AST sandbox + budget guard) |
+| `rate_limit_evaluate` | Int | 20 | ⚠️ DEPRECATED v30: evaluate/validate không còn rate limit (đã có AST sandbox + budget guard) |
+| `rate_limit_ai` | Int | 5 | AI suggest rate limit (req/min) — vẫn hoạt động |
 | `ai_provider` | Select | — | Anthropic / Deepseek / ChatGPT |
 | `ai_model` | Data | `claude-3-sonnet-20240229` | AI model identifier |
 | `allowed_functions` | Table → Formula Allowed Function | — | Whitelisted formula functions |
@@ -474,7 +474,7 @@ formula_builder/
 
 ## 7. Formula Engine — Engine Lõi
 
-> **Version:** 29.1.0 | **Location:** `formula_utils/`
+> **Version:** 30.0.0 | **Location:** `formula_utils/`
 
 Đây là engine độc lập với Frappe, có thể dùng standalone. Mọi file trong `formula_utils/` **không import `frappe`**.
 
@@ -933,7 +933,7 @@ number_to_words(1234567, currency="VND")
 
 **Security per endpoint:**
 - Permission check (`_assert_read_perm`) for all read/evaluate endpoints
-- Rate limiting via Redis atomic counters per user/action
+- Rate limiting via Redis atomic counters (chỉ áp dụng cho ai_suggest)
 - Input sanitization (`_sanitize_frm_doc`) filters out system fields and non-data fieldtypes
 - AI suggest: only user with write access to Formula Builder Settings can use
 
@@ -1744,11 +1744,13 @@ Post-resolve data transformation applied automatically to any source type with `
 
 ### Rate Limits (configurable)
 
-| Action | Default Limit | Window |
-|---|---|---|
-| Validate formula | 40/min | 60s |
-| Evaluate formula | 20/min | 60s |
-| AI suggestion | 5/min | 60s |
+> ⚠️ **Thay đổi từ v30:** evaluate/validate **không còn rate limit**. Thay bằng AST sandbox + budget guard (max_operations). Chỉ `ai_suggest` còn dùng rate limit (vì gọi external API).
+
+| Action | Default Limit | Window | Ghi chú |
+|---|---|---|---|
+| AI suggestion | 5/min | 60s | Gọi external AI API — vẫn áp dụng |
+| Validate formula | — | — | Đã bỏ rate limit từ v30 |
+| Evaluate formula | — | — | Đã bỏ rate limit từ v30 |
 
 ---
 

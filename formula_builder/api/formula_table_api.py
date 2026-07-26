@@ -8,7 +8,7 @@
 #    VALIDATE   → validate_formula
 #    SCC_CHECK  → scc_check
 #
-#  Phụ thuộc: formula_utils v29.1.0  (xem __init__.py)
+#  Phụ thuộc: formula_utils v30.0.0  (xem __init__.py)
 #  Frappe  : @whitelist(), frappe.parse_json(), frappe.log_error()
 # ═══════════════════════════════════════════════════════════════════════════
 

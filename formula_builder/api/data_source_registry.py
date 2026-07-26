@@ -110,7 +110,13 @@ def _get_custom_function_whitelist() -> List[str]:
 def _check_custom_function_allowed(module_path: str) -> None:
     """Raise PermissionError if module_path is not in the whitelist."""
     whitelist = _get_custom_function_whitelist()
-    if not any(module_path.startswith(prefix) for prefix in whitelist):
+    # Dùng == hoặc startswith(prefix + ".") để tránh prefix collision
+    # Ví dụ: "formula_builder.custom_functions" match "formula_builder.custom_functions.utils"
+    # nhưng KHÔNG match "formula_builder.custom_functions_evil"
+    if not any(
+        module_path == prefix or module_path.startswith(prefix + ".")
+        for prefix in whitelist
+    ):
         raise frappe.PermissionError(
             f"Module '{module_path}' not in custom_function whitelist."
         )

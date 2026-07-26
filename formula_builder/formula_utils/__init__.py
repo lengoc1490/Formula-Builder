@@ -1,5 +1,5 @@
 # formula_utils/__init__.py
-# Formula Engine v29.1.0
+# Formula Engine v30.0.0
 # Public API exports
 
 from .errors import (
