@@ -208,6 +208,9 @@ class MultiTableFormulaBuilder:
                 f"Table '{table_name}' đã được thêm. Mỗi table chỉ thêm 1 lần."
             )
 
+        # Auto-convert Frappe row objects → dicts
+        rows = _rows_to_dicts(rows)
+
         self.tables.append({
             "table_name": table_name,
             "rows": rows,
@@ -543,3 +546,138 @@ def build_engine_from_builder(
         **engine_kwargs,
     )
     return engine, context
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# §5  Frappe Integration — auto-extract từ doc
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _rows_to_dicts(rows) -> List[Dict[str, Any]]:
+    """Convert Frappe child table rows → list of dicts.
+
+    Chấp nhận:
+    - List[Frappe Document] (child table rows từ doc.get("items"))
+    - List[dict] (đã là dict → giữ nguyên)
+    - Single Frappe Document (doc.get("items")[0])
+    """
+    if not rows:
+        return []
+
+    result = []
+    for row in rows:
+        if isinstance(row, dict):
+            result.append(row)
+        elif hasattr(row, "as_dict"):
+            result.append(row.as_dict())
+        elif hasattr(row, "__dict__"):
+            result.append({k: v for k, v in row.__dict__.items()
+                          if not k.startswith("_")})
+        else:
+            result.append(dict(row))
+    return result
+
+
+def from_frappe_doc(
+    doc,
+    table_configs: List[Dict[str, Any]],
+    *,
+    normalize_mode: str = "scoped",
+    normalize_fn: Optional[Callable[[str], str]] = None,
+    scalar_fields: Optional[List[str]] = None,
+    base_context: Optional[Dict[str, Any]] = None,
+) -> "MultiTableFormulaBuilder":
+    """Tạo MultiTableFormulaBuilder TRỰC TIẾP từ 1 Frappe Document.
+
+    KHÔNG cần tự loop, tự convert rows → dicts, tự extract scalar fields.
+    Chỉ cần truyền doc + config → builder đã sẵn sàng build().
+
+    Args:
+        doc:             Frappe Document object (vd: frappe.get_doc("Quotation", "QTN-001"))
+        table_configs:   List[Dict] — cấu hình mỗi bảng con:
+                         [{
+                             "table_field": "items",        # Tên field child table
+                             "formula_fields": ["width", "qty"],
+                             "literal_fields": ["unit_price"],
+                             "id_field": "slug",            # Mặc định "slug"
+                             "synthetic_formulas": ...,     # Tùy chọn
+                             "formula_builder": ...,        # Tùy chọn
+                             "prefix": "",                  # Tùy chọn
+                         }, ...]
+        normalize_mode:  "scoped" | "global"
+        normalize_fn:    Custom normalize function.
+        scalar_fields:   List tên field scalar trên parent doc cần inject vào context.
+                         VD: ["W_mm", "H_mm", "aluminum_color"].
+                         Nếu None → auto-extract tất cả field không phải Table.
+        base_context:    Context bổ sung (global vars, constants...).
+
+    Returns:
+        MultiTableFormulaBuilder đã cấu hình đầy đủ, sẵn sàng gọi .build().
+
+    Ví dụ:
+        doc = frappe.get_doc("Quotation", "QTN-2026-00042")
+        builder = from_frappe_doc(doc, [
+            {"table_field": "items", "formula_fields": ["width", "qty"],
+             "literal_fields": ["unit_price", "calc_pattern"],
+             "synthetic_formulas": synthetic_for_pattern},
+            {"table_field": "glasses", "formula_fields": ["width", "height", "qty"],
+             "literal_fields": ["unit_price"]},
+        ], scalar_fields=["W_mm", "H_mm", "n_panel"])
+        formulas, context = builder.build()
+    """
+    builder = MultiTableFormulaBuilder(
+        normalize_mode=normalize_mode,
+        normalize_fn=normalize_fn,
+    )
+
+    # ── Auto-extract scalar fields từ parent doc ──
+    ctx = dict(base_context or {})
+
+    if scalar_fields is None:
+        # Auto-detect: lấy tất cả field không phải Table
+        meta = getattr(doc, "meta", None)
+        if meta:
+            for df in meta.fields:
+                if df.fieldtype not in ("Table", "Section Break", "Column Break",
+                                         "Tab Break", "HTML", "Button"):
+                    val = getattr(doc, df.fieldname, None)
+                    if val is not None and df.fieldname not in ctx:
+                        ctx[df.fieldname] = val
+    else:
+        for f in scalar_fields:
+            val = getattr(doc, f, None)
+            if val is not None and f not in ctx:
+                ctx[f] = val
+
+    # ── Thêm từng bảng con ──
+    for cfg in table_configs:
+        table_field = cfg.pop("table_field")
+        raw_rows = doc.get(table_field) or []
+        rows = _rows_to_dicts(raw_rows)
+
+        builder.add_table(
+            table_name=cfg.pop("table_name", table_field),
+            rows=rows,
+            **cfg,
+        )
+
+    # ── Lưu base_context để dùng khi build() ──
+    builder._auto_context = ctx
+
+    return builder
+
+
+# Monkey-patch build() để tự động merge _auto_context nếu có
+_original_build = MultiTableFormulaBuilder.build
+
+
+def _build_with_auto_context(self, base_context=None):
+    """Override build() — tự merge _auto_context nếu dùng from_frappe_doc()."""
+    if getattr(self, "_auto_context", None):
+        merged = dict(self._auto_context)
+        if base_context:
+            merged.update(base_context)
+        base_context = merged
+    return _original_build(self, base_context)
+
+
+MultiTableFormulaBuilder.build = _build_with_auto_context

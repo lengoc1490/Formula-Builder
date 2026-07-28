@@ -23,6 +23,7 @@ from formula_builder.table_formula_builder import (
     synthetic_for_pattern,
     synthetic_simple_total,
     build_engine_from_builder,
+    from_frappe_doc,
 )
 from formula_builder.api.variable_resolver import VariableResolver, ScopeContext
 from formula_builder.api.batch_binding_resolver import (
@@ -93,5 +94,5 @@ __all__ = [
     "MultiTableFormulaBuilder",
     "normalize_global", "normalize_scoped",
     "synthetic_for_pattern", "synthetic_simple_total",
-    "build_engine_from_builder",
+    "build_engine_from_builder", "from_frappe_doc",
 ]
