@@ -70,16 +70,26 @@
     - [Data Structures](#data-structures)
     - [Key Methods](#key-methods)
     - [ERPNextAdapter \& FrappeERPNextAdapter](#erpnextadapter--frappeerpnextadapter)
-  - [13. Composite Source Types — Tổ hợp nguồn dữ liệu (v31)](#13-composite-source-types--tổ-hợp-nguồn-dữ-liệu-v31)
+  - [13. MultiTableFormulaBuilder — Build Formulas Từ Dữ Liệu Bảng (v31)](#13-multitableformulabuilder--build-formulas-từ-dữ-liệu-bảng-new-v31)
+    - [13.1 Giới thiệu](#131-giới-thiệu)
+    - [13.2 API](#132-api)
+    - [13.3 Ví dụ cơ bản](#133-ví-dụ-cơ-bản)
+    - [13.4 Các chế độ normalize](#134-các-chế-độ-normalize)
+    - [13.5 Cross-reference giữa các bảng](#135-cross-reference-giữa-các-bảng)
+    - [13.6 Custom synthetic formulas](#136-custom-synthetic-formulas)
+    - [13.7 Override toàn bộ logic](#137-override-toàn-bộ-logic-cho-1-bảng)
+    - [13.8 Hybrid: builder + tự code](#138-hybrid-builder--tự-code)
+    - [13.9 Bao quát trường hợp](#139-bao-quát-trường-hợp)
+  - [14. Composite Source Types — Tổ hợp nguồn dữ liệu (v31)](#14-composite-source-types--tổ-hợp-nguồn-dữ-liệu-v31)
     - [13.1 Pipeline — Chain tuần tự](#131-pipeline--chain-tuần-tự)
     - [13.2 Conditional — Rẽ nhánh theo điều kiện](#132-conditional--rẽ-nhánh-theo-điều-kiện)
     - [13.3 Fallback Chain — Graceful Degradation](#133-fallback-chain--graceful-degradation)
     - [13.4 Nesting — Lồng ghép](#134-nesting--lồng-ghép)
   - [14. Transform Layer — Biến đổi dữ liệu sau resolve (v31)](#14-transform-layer--biến-đổi-dữ-liệu-sau-resolve-v31)
-  - [15. Security](#15-security)
+  - [16. Security](#16-security)
     - [Defense in Depth](#defense-in-depth)
     - [Rate Limits (configurable)](#rate-limits-configurable)
-  - [16. Performance \& Caching](#16-performance--caching)
+  - [17. Performance \& Caching](#17-performance--caching)
     - [Cache Architecture](#cache-architecture)
     - [Optimization Patterns](#optimization-patterns)
   - [17. Integration Guide](#17-integration-guide)
@@ -1553,7 +1563,180 @@ inputs = build_inputs_from_frappe_doc(doc, child_table_map, scalar_fields, globa
 
 ---
 
-## 13. Composite Source Types — Tổ hợp nguồn dữ liệu (NEW v31)
+## 13. MultiTableFormulaBuilder — Build Formulas Từ Dữ Liệu Bảng (NEW v31)
+
+### 13.1 Giới thiệu
+
+`MultiTableFormulaBuilder` là utility class **generic** giúp tự động build `List[{"name":..., "formula":...}]` từ dữ liệu có cấu trúc dạng bảng (child tables). 
+
+**Không gắn với bất kỳ ngành nghề nào** — dùng được cho BOM, hóa đơn, bảng lương, dự toán, kế hoạch sản xuất, hay bất kỳ bài toán nào có dữ liệu dạng rows + formula fields.
+
+**Vấn đề nó giải quyết:** Thay vì mỗi app phải tự viết 50-60 dòng code boilerplate (for lồng for, normalize, inject literal, synthetic formulas), bạn chỉ cần ~10 dòng khai báo.
+
+### 13.2 API
+
+```python
+from formula_builder.integration import MultiTableFormulaBuilder
+
+builder = MultiTableFormulaBuilder(normalize_mode="scoped")
+```
+
+| Method | Mô tả |
+|---|---|
+| `add_table(name, rows, formula_fields, ...)` | Thêm 1 bảng dữ liệu. Trả về self (fluent). |
+| `build(base_context)` → `(formulas, context)` | Build tất cả formulas + context. |
+| `get_var_ref(table, slug, field)` → str | Lấy tên biến engine chuẩn. |
+| `get_var_prefix(table, slug)` → str | Lấy prefix. |
+| `report()` → str | In cấu trúc builder (debug). |
+
+**Tham số `add_table()`:**
+
+| Tham số | Mặc định | Mô tả |
+|---|---|---|
+| `table_name` | (required) | Tên bảng, dùng làm namespace trong scoped mode |
+| `rows` | (required) | `List[dict]` — dữ liệu các dòng |
+| `formula_fields` | (required) | `List[str]` — field nào chứa công thức FB |
+| `id_field` | `"slug"` | Field định danh dòng |
+| `literal_fields` | `[]` | Field cần inject literal vào context |
+| `synthetic_formulas` | `None` | Callback sinh thêm formulas |
+| `formula_builder` | `None` | Override toàn bộ logic build cho bảng này |
+| `skip_empty_formula` | `True` | Bỏ qua dòng không có công thức |
+| `prefix` | `""` | Prefix thêm vào tên biến |
+
+### 13.3 Ví dụ cơ bản
+
+```python
+from formula_builder.integration import (
+    MultiTableFormulaBuilder,
+    synthetic_for_pattern,
+    build_engine_from_builder,
+)
+
+builder = MultiTableFormulaBuilder(normalize_mode="scoped")
+
+# Thêm bảng vật tư
+builder.add_table(
+    table_name="materials",
+    rows=material_rows,
+    formula_fields=["width", "height", "qty"],
+    literal_fields=["unit_price", "weight_per_unit"],
+    id_field="slug",
+    synthetic_formulas=synthetic_for_pattern,
+)
+
+# Thêm bảng nhân công
+builder.add_table(
+    table_name="labor",
+    rows=labor_rows,
+    formula_fields=["hours", "rate_formula"],
+    literal_fields=["base_rate"],
+    id_field="labor_code",
+)
+
+# Build
+formulas, context = builder.build(base_context={"PROJECT_SIZE": 5000})
+engine = FormulaEngine(formulas=formulas, context=context)
+result = engine.evaluate(context)
+```
+
+### 13.4 Các chế độ normalize
+
+| Mode | Cú pháp UI | Tên biến Engine | Khi dùng |
+|---|---|---|---|
+| `"scoped"` (mặc định) | `materials.part_A.width` | `materials__part_A__width` | Slug có thể trùng giữa các bảng |
+| `"global"` | `materials.part_A.width` | `part_A__width` | Slug unique toàn cục |
+
+### 13.5 Cross-reference giữa các bảng
+
+```python
+# Bảng materials, dòng frame:
+#   width = "W_mm - 2*OFFSET"
+# Bảng materials, dòng glass_panel:
+#   width = "materials.frame.width - 10"  ← Tham chiếu dòng khác!
+
+# Sau normalize (scoped mode):
+#   "materials__glass_panel__width" = "materials__frame__width - 10"
+#   → Engine tự DAG: tính frame trước, glass_panel sau
+```
+
+### 13.6 Custom synthetic formulas
+
+```python
+def my_synthetic(builder, table_name, slug, row, context, var_prefix, **kwargs):
+    return [
+        {"name": f"{var_prefix}__area",
+         "formula": f"({var_prefix}__width/1000)*({var_prefix}__height/1000)"},
+        {"name": f"{var_prefix}__total",
+         "formula": f"{var_prefix}__area * {var_prefix}__qty * {var_prefix}__unit_price"},
+    ]
+
+builder.add_table(
+    table_name="glass_panels",
+    rows=glass_rows,
+    formula_fields=["width", "height", "qty"],
+    literal_fields=["unit_price"],
+    synthetic_formulas=my_synthetic,
+)
+```
+
+### 13.7 Override toàn bộ logic cho 1 bảng
+
+```python
+def build_taxes_manually(builder, table_name, rows, context):
+    """Logic thuế phức tạp → tự code toàn bộ."""
+    formulas = []
+    for row in rows:
+        rate = frappe.db.get_value("Tax Rule", {"region": row["region"]}, "rate")
+        formulas.append({
+            "name": f"TAX_{row['code']}",
+            "formula": f"{rate} * SUBTOTAL",
+        })
+    return formulas
+
+builder.add_table(
+    table_name="taxes",
+    rows=tax_rows,
+    formula_builder=build_taxes_manually,  # ← Override
+)
+```
+
+### 13.8 Hybrid: builder + tự code
+
+```python
+# Dùng builder cho 80% trường hợp chuẩn
+builder = MultiTableFormulaBuilder(normalize_mode="scoped")
+builder.add_table("profiles", profile_rows, [...], ...)
+builder.add_table("glasses", glass_rows, [...], ...)
+
+# Tự code 20% đặc biệt
+custom_formulas = build_complex_dynamic_rules(dynamic_rule_rows)
+
+# Merge
+formulas, context = builder.build(base_inputs)
+formulas.extend(custom_formulas)
+engine = FormulaEngine(formulas=formulas, context=context)
+```
+
+### 13.9 Bao quát trường hợp
+
+| Trường hợp | Hỗ trợ? |
+|---|---|
+| 1 bảng, 1 formula/row | ✅ |
+| 1 bảng, N formula/row | ✅ |
+| N bảng, mỗi bảng N formula | ✅ |
+| Cross-row reference (cùng bảng) | ✅ Tự động normalize |
+| Cross-table reference (khác bảng) | ✅ Tự động normalize |
+| Synthetic formulas | ✅ Qua callback |
+| Literal injection | ✅ `literal_fields=[...]` |
+| Phát hiện trùng tên | ✅ Tự động ValueError |
+| Custom normalize | ✅ `normalize_fn=` |
+| Override toàn bộ 1 bảng | ✅ `formula_builder=` |
+| Merge thủ công | ✅ `formulas.extend(...)` |
+| Mọi ngành nghề | ✅ Generic, không gắn BOM |
+
+---
+
+## 14. Composite Source Types — Tổ hợp nguồn dữ liệu (NEW v31)
 
 Three new source types that COMPOSE existing sources to solve complex data flow patterns without writing Python code.
 
@@ -1686,7 +1869,7 @@ This enables **infinite composability** — complex data flows are decomposed in
 
 ---
 
-## 14. Transform Layer — Biến đổi dữ liệu sau resolve (NEW v31)
+## 15. Transform Layer — Biến đổi dữ liệu sau resolve (NEW v31)
 
 Post-resolve data transformation applied automatically to any source type with `supports_transform=true`.
 
@@ -1723,7 +1906,7 @@ Post-resolve data transformation applied automatically to any source type with `
 
 ---
 
-## 15. Security
+## 16. Security
 
 ### Defense in Depth
 
@@ -1754,7 +1937,7 @@ Post-resolve data transformation applied automatically to any source type with `
 
 ---
 
-## 16. Performance & Caching
+## 17. Performance & Caching
 
 ### Cache Architecture
 

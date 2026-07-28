@@ -16,6 +16,14 @@ from formula_builder.flexible_formula_engine import (
     CalculationResult,
     build_inputs_from_frappe_doc,
 )
+from formula_builder.table_formula_builder import (
+    MultiTableFormulaBuilder,
+    normalize_global,
+    normalize_scoped,
+    synthetic_for_pattern,
+    synthetic_simple_total,
+    build_engine_from_builder,
+)
 from formula_builder.api.variable_resolver import VariableResolver, ScopeContext
 from formula_builder.api.batch_binding_resolver import (
     BatchBindingResolver,
@@ -81,4 +89,9 @@ __all__ = [
     "list_source_types", "get_source_type_schema",
     "validate_binding_source_config", "get_registry_stats",
     "test_data_source",
+    # MultiTableFormulaBuilder (v31 Phase 2) — multi-table formula construction
+    "MultiTableFormulaBuilder",
+    "normalize_global", "normalize_scoped",
+    "synthetic_for_pattern", "synthetic_simple_total",
+    "build_engine_from_builder",
 ]
