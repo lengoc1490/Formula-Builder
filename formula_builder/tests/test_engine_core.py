@@ -287,3 +287,114 @@ class TestRecalculateFull(FrappeTestCase):
         self.assertEqual(result["a"], 2)
         self.assertEqual(result["b"], 52)
         self.assertEqual(stats.recalculated_nodes, 2)  # a + b đều recalc
+
+
+class TestDependencyGraphFromExprs(FrappeTestCase):
+    """Regression tests: regex-based build_from_exprs correctness."""
+
+    def test_attr_access_not_confused_with_variable(self):
+        """Bug #1 regression: .total trong snap.total KHÔNG phải dependency vào node 'total'.
+
+        build_from_exprs dùng regex — phải strip .field trước khi extract identifier,
+        nếu không sẽ tạo false dependency từ snap.total → node 'total'.
+        """
+        formulas = [
+            {"name": "total", "formula": "100 + 200"},
+            {"name": "row",   "formula": "snap.total * 2"},
+        ]
+        engine = FormulaEngine(
+            formulas=formulas,
+            safe_funcs=BASE_FUNCS,
+        )
+        # Nếu dependency graph sai, engine sẽ báo CIRCULAR_DEPENDENCY giả
+        # hoặc topo order sai khiến total chưa được tính trước row
+        result = engine.calculate({"snap": {"total": 500}})
+        self.assertEqual(result["total"], 300)
+        self.assertEqual(result["row"], 1000)
+
+    def test_allowed_attr_not_confused_with_variable(self):
+        """Các ALLOWED_ATTRS (.get, .keys, .values, .items, .to_dict) không gây false dep.
+
+        Dùng object có thuộc tính thật (dict với các method) thay vì dict key conflict.
+        """
+        formulas = [
+            {"name": "get",    "formula": "99"},
+            {"name": "keys",   "formula": "88"},
+            {"name": "values", "formula": "77"},
+            {"name": "items",  "formula": "66"},
+            {"name": "row",    "formula": "100"},  # Độc lập — chỉ phụ thuộc input
+        ]
+        engine = FormulaEngine(
+            formulas=formulas,
+            safe_funcs=BASE_FUNCS,
+        )
+        # Không truyền input nào — tất cả formula là constant
+        result = engine.calculate({})
+        self.assertEqual(result["get"], 99)
+        self.assertEqual(result["keys"], 88)
+        self.assertEqual(result["values"], 77)
+        self.assertEqual(result["items"], 66)
+        self.assertEqual(result["row"], 100)
+
+    def test_dot_attr_not_false_dependency(self):
+        """snap.total không tạo dependency vào node 'total' — chỉ 'snap' mới là variable.
+
+        Dùng dict với key thay vì object attribute, vì DotToSubscriptTransformer
+        biến .attr thành ['attr'] khi attr không nằm trong ALLOWED_ATTRS.
+        """
+        formulas = [
+            {"name": "total",  "formula": "100 + 200"},
+            {"name": "row",    "formula": "snap['total'] * 2"},
+            {"name": "other",  "formula": "100"},
+        ]
+        engine = FormulaEngine(
+            formulas=formulas,
+            safe_funcs=BASE_FUNCS,
+        )
+        result = engine.calculate({
+            "snap": {"total": 500},
+        })
+        # total = 300 (constant, không phụ thuộc vào snap.total)
+        # row = snap['total'] * 2 = 500 * 2 = 1000
+        # other = 100 (constant)
+        self.assertEqual(result["total"], 300)
+        self.assertEqual(result["row"], 1000)
+        self.assertEqual(result["other"], 100)
+
+        # Verify: total KHÔNG phụ thuộc vào row (không có false dep)
+        # Nếu có false dep, topo sort sẽ bị sai
+
+    def test_self_ref_is_cycle(self):
+        """a = a + 1 là self-reference thật → phải raise CIRCULAR_DEPENDENCY."""
+        with self.assertRaises(FormulaError):
+            FormulaEngine(
+                formulas=[{"name": "a", "formula": "a + 1"}],
+                safe_funcs=BASE_FUNCS,
+            )
+
+    def test_mixed_literal_and_attr_no_false_cycle(self):
+        """String literal + attribute access trong cùng formula — không false cycle."""
+        formulas = [
+            {"name": "NC",      "formula": "sum(q * dg for q, dg, t, n in bom if t == 'NC')"},
+            {"name": "VL",      "formula": "sum(q * dg for q, dg, t, n in bom if t == 'VL')"},
+            {"name": "TT",      "formula": "VL + NC"},
+            {"name": "wrapped", "formula": "ctx.get('TT') + snap.NC * 2"},
+        ]
+        engine = FormulaEngine(
+            formulas=formulas,
+            safe_funcs=BASE_FUNCS,
+        )
+        ctx = {
+            "bom": [
+                (10, 150000, "VL", "Xi măng"),
+                (5,  250000, "NC", "Nhân công"),
+                (20, 200000, "VL", "Cát"),
+            ],
+            "ctx": {"get": lambda k: 0},
+            "snap": {"NC": 0},
+        }
+        result = engine.calculate(ctx)
+        self.assertEqual(result["VL"], 5_500_000)
+        self.assertEqual(result["NC"], 1_250_000)
+        self.assertEqual(result["TT"], 6_750_000)
+        self.assertEqual(result["wrapped"], 0)

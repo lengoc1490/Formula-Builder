@@ -1,0 +1,138 @@
+{
+  "single_100": {
+    "init_ms": 12.092498998754309,
+    "eval_avg_ms": 0.08024259986996185,
+    "eval_min_ms": 0.06585899973288178,
+    "eval_max_ms": 0.0940690006245859,
+    "nodes_per_sec": 1246220.8373364804,
+    "formula_count": 100,
+    "dag_depth": 0
+  },
+  "single_500": {
+    "init_ms": 9.431731999939075,
+    "eval_avg_ms": 0.2538351996918209,
+    "eval_min_ms": 0.19236200023442507,
+    "eval_max_ms": 0.3192410003975965,
+    "nodes_per_sec": 1969781.9711649355,
+    "formula_count": 500,
+    "dag_depth": 0
+  },
+  "single_1000": {
+    "init_ms": 13.187901000492275,
+    "eval_avg_ms": 0.7767540003745429,
+    "eval_min_ms": 0.4507080011535436,
+    "eval_max_ms": 1.0860780002985848,
+    "nodes_per_sec": 1287408.8830154852,
+    "formula_count": 1000,
+    "dag_depth": 0
+  },
+  "multi_10x100": {
+    "n_products": 10,
+    "total_formulas": 1000,
+    "init_total_ms": 13.7476340005378,
+    "eval_total_ms": 0.3365499997016741,
+    "avg_per_product_ms": 0.03312940025352873,
+    "products_per_sec": 29713.267000042302,
+    "formula_nodes_per_sec": 2971326.7000042303
+  },
+  "multi_100x50": {
+    "n_products": 100,
+    "total_formulas": 5000,
+    "init_total_ms": 71.65436200011754,
+    "eval_total_ms": 1.6243649988609832,
+    "avg_per_product_ms": 0.016095759892778005,
+    "products_per_sec": 61562.51831954071,
+    "formula_nodes_per_sec": 3078125.9159770356
+  },
+  "multi_100x100": {
+    "n_products": 100,
+    "total_formulas": 10000,
+    "init_total_ms": 153.1766289990628,
+    "eval_total_ms": 3.3968299994739937,
+    "avg_per_product_ms": 0.03378461004103883,
+    "products_per_sec": 29439.21244674747,
+    "formula_nodes_per_sec": 2943921.244674747
+  },
+  "multi_1000x100": {
+    "n_products": 1000,
+    "total_formulas": 100000,
+    "init_total_ms": 1833.3101529988198,
+    "eval_total_ms": 33.35153700027149,
+    "avg_per_product_ms": 0.033141961010187515,
+    "products_per_sec": 29983.625641956463,
+    "formula_nodes_per_sec": 2998362.564195646
+  },
+  "batch_100x50": {
+    "n_rows": 100,
+    "formula_count": 50,
+    "loop_avg_ms": 0.9807749993342441,
+    "batch_avg_ms": 0.9760196668745872,
+    "speedup": 1.0048721686878344
+  },
+  "batch_1000x50": {
+    "n_rows": 1000,
+    "formula_count": 50,
+    "loop_avg_ms": 13.127321000259448,
+    "batch_avg_ms": 9.899621334019079,
+    "speedup": 1.326042740154989
+  },
+  "trace_100": {
+    "no_trace_avg_ms": 0.032562600245000795,
+    "trace_avg_ms": 0.04548639990389347,
+    "overhead_pct": 39.689089819775106
+  },
+  "trace_500": {
+    "no_trace_avg_ms": 0.11476419931568671,
+    "trace_avg_ms": 0.16810340021038428,
+    "overhead_pct": 46.477212591337114
+  },
+  "audit_100": {
+    "no_audit_avg_ms": 0.034375999894109555,
+    "audit_avg_ms": 0.06410000023606699,
+    "overhead_pct": 86.46730403048069
+  },
+  "audit_500": {
+    "no_audit_avg_ms": 0.13166340031602886,
+    "audit_avg_ms": 0.17302359992754646,
+    "overhead_pct": 31.413589131255616
+  },
+  "snapshot_100": {
+    "eval_avg_ms": 0.03192059994034935,
+    "snapshot_avg_ms": 0.3355868004291551,
+    "snapshot_cost_ms": 0.30366620048880577,
+    "overhead_pct": 951.317334436924
+  },
+  "snapshot_500": {
+    "eval_avg_ms": 0.13312100018083584,
+    "snapshot_avg_ms": 1.53614440059755,
+    "snapshot_cost_ms": 1.4030234004167144,
+    "overhead_pct": 1053.9459578209317
+  },
+  "incremental_100": {
+    "full_avg_ms": 0.037512200651690364,
+    "incremental_avg_ms": 0.08247479963756632,
+    "speedup": 0.45483227381620683
+  },
+  "incremental_500": {
+    "full_avg_ms": 0.12036720036121551,
+    "incremental_avg_ms": 0.53446419951797,
+    "speedup": 0.22521096917206795
+  },
+  "incremental_1000": {
+    "full_avg_ms": 0.2615253994008526,
+    "incremental_avg_ms": 0.6248847992537776,
+    "speedup": 0.41851778073840173
+  },
+  "cost_50b_10g": {
+    "n_buckets": 50,
+    "n_groups": 10,
+    "total_formulas": 70,
+    "eval_avg_ms": 0.02768360027403105
+  },
+  "cost_100b_20g": {
+    "n_buckets": 100,
+    "n_groups": 20,
+    "total_formulas": 130,
+    "eval_avg_ms": 0.04034160010633059
+  }
+}

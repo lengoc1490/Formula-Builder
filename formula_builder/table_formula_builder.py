@@ -73,6 +73,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 # §1  Cross-Reference Normalizers
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Pre-compiled regex patterns for performance (v31 optimization)
+_RE_GLOBAL = re.compile(r'\w+\.(\w[\w-]*)\.(\w+)')
+_RE_SCOPED = re.compile(r'(\w+)\.(\w[\w-]*)\.(\w+)')
+
+
 def normalize_global(expr: str) -> str:
     """Option A: Slug unique toàn cục → bỏ table name.
 
@@ -81,7 +86,7 @@ def normalize_global(expr: str) -> str:
     VD: "profiles.canh_ngang.width" → "canh_ngang__width"
         "glasses.panel_top.height"  → "panel_top__height"
     """
-    return re.sub(r'\w+\.(\w[\w-]*)\.(\w+)', r'\1__\2', expr)
+    return _RE_GLOBAL.sub(r'\1__\2', expr)
 
 
 def normalize_scoped(expr: str) -> str:
@@ -93,7 +98,7 @@ def normalize_scoped(expr: str) -> str:
         "glasses.canh_ngang.width"  → "glasses__canh_ngang__width"
         → Không collision dù 2 bảng cùng slug "canh_ngang"
     """
-    return re.sub(r'(\w+)\.(\w[\w-]*)\.(\w+)', r'\1__\2__\3', expr)
+    return _RE_SCOPED.sub(r'\1__\2__\3', expr)
 
 
 # Registry
@@ -315,6 +320,14 @@ class MultiTableFormulaBuilder:
                 ctx_key = f"{var_prefix}__{key}"
                 if ctx_key not in context:
                     context[ctx_key] = row[key]
+                elif context[ctx_key] != row[key]:
+                    raise ValueError(
+                        f"TRÙNG TÊN BIẾN LITERAL: '{ctx_key}'.\n"
+                        f"  Table: {table_name}, Slug: {slug}, Field: {key}\n"
+                        f"  Giá trị hiện có: {context[ctx_key]!r}\n"
+                        f"  Giá trị mới:     {row[key]!r}\n"
+                        f"  Gợi ý: Đổi slug hoặc dùng normalize_mode='scoped'."
+                    )
 
         # ── (b) Build formulas từ formula_fields ──
         formulas: List[Dict[str, str]] = []
@@ -409,6 +422,13 @@ class MultiTableFormulaBuilder:
 
         VD (scoped): "profiles__canh_ngang"
         VD (global): "canh_ngang"
+
+        ⚠️  Với normalize_mode="custom": method này giả định normalize_fn
+        nối các thành phần bằng ``__`` (double underscore) và dùng
+        ``.rsplit("__", 1)[0]`` để trích xuất prefix. Nếu custom normalize_fn
+        của bạn dùng ký tự khác (``.``, ``$``, ``-``...), method này sẽ trả về
+        kết quả SAI. Trong trường hợp đó, tự tính prefix thủ công thay vì
+        dùng helper này.
         """
         if self.normalize_mode == "scoped":
             return f"{table_name}__{slug}"
@@ -461,7 +481,20 @@ def synthetic_for_pattern(
     Phù hợp cho bảng cần tính số lượng đơn vị rồi nhân đơn giá.
 
     VD: profiles (nhôm), steel_bars (thép), fabric_rolls (vải)...
+
+    ⚠️  QUAN TRỌNG: Hàm ``lookup_calc_pattern`` KHÔNG phải built-in của FormulaEngine.
+    Đây chỉ là ví dụ mẫu (reference implementation). Bạn PHẢI tự đăng ký hàm
+    ``lookup_calc_pattern`` vào ``safe_funcs`` / ``runtime_env`` của FormulaEngine
+    trước khi eval, nếu không sẽ gặp lỗi:
+        "Hàm 'lookup_calc_pattern' không được hỗ trợ"
+
+    Cách đăng ký:
+        engine = FormulaEngine(
+            formulas=formulas,
+            safe_funcs={**BASE_FUNCS, "lookup_calc_pattern": my_impl},
+        )
     """
+
     return [
         {
             "name": f"{var_prefix}__unit_qty",

@@ -3,12 +3,18 @@
 
 import ast
 import json
+import re
 from collections import defaultdict, deque
 from typing import Dict, List, Set, Any, Tuple, Callable, Optional
 from dataclasses import dataclass
 
 from .errors import FormulaError, ErrorCode
 from .types import TopoSortResult
+
+# Pre-compiled regex for fast identifier extraction (v31 optimization)
+_RE_STRING = re.compile(r"""(?:"[^"]*"|'[^']*')""")
+_RE_ATTR = re.compile(r'\.[a-zA-Z_]\w*')        # attribute access: .field
+_RE_IDENTIFIER = re.compile(r'[a-zA-Z_]\w*')
 
 
 # ============================================================================
@@ -18,7 +24,7 @@ from .types import TopoSortResult
 class DependencyGraph:
     def __init__(self):
         self.graph = defaultdict(set)         # parent → children
-        self.reverse_graph = defaultdict(set) # child → parents  
+        self.reverse_graph = defaultdict(set) # child → parents
         self.nodes = set()
 
     def add_node(self, name: str):
@@ -34,14 +40,39 @@ class DependencyGraph:
         # Add all nodes first
         for name in ast_map:
             self.add_node(name)
-        
+
         # Build edges
         for name, tree in ast_map.items():
             used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
             for dep in used & self.nodes:
                 self.add_edge(dep, name)
-        
+
         # Detect cycles immediately
+        self._detect_cycles()
+
+    def build_from_exprs(self, exprs: Dict[str, str]):
+        """Build graph from raw formula expressions (regex-based, no AST needed).
+
+        Fast path: dùng regex để extract identifiers từ formula text,
+        tránh phải parse AST. Xử lý cẩn thận:
+        1. Strip string literals ('...', "...") → tránh nhầm 'NC' với biến NC
+        2. Strip attribute access (.field) → tránh nhầm snap.total thành
+           dependency vào "total" (chỉ "snap" mới là variable reference)
+        3. Extract identifiers còn lại và match với known formula names
+        """
+        # Add all nodes
+        for name in exprs:
+            self.add_node(name)
+
+        # Build edges — purify text first, then extract identifiers
+        for name, expr in exprs.items():
+            clean = _RE_STRING.sub('""', expr)   # Bước 1: xóa string literals (tránh 'NC' → biến NC)
+            clean = _RE_ATTR.sub('', clean)       # Bước 2: xóa .field (tránh snap.total → dep vào total)
+            identifiers = set(_RE_IDENTIFIER.findall(clean))
+            for dep in identifiers & self.nodes:
+                self.add_edge(dep, name)  # Bao gồm self-reference (a = a + 1 là cycle thật)
+
+        # Detect cycles
         self._detect_cycles()
 
     def _detect_cycles(self):

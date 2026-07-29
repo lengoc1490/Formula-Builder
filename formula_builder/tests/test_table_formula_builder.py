@@ -587,7 +587,7 @@ class TestCollisionAndValidation(FrappeTestCase):
             builder.build()
 
     def test_collision_same_table_same_slug(self):
-        """Same table, same slug twice → collision."""
+        """Same table, same slug twice → collision on formula fields."""
         rows = [
             {"slug": "frame", "width": "W_mm"},
             {"slug": "frame", "width": "H_mm"},  # Duplicate slug in same table
@@ -601,6 +601,56 @@ class TestCollisionAndValidation(FrappeTestCase):
         )
         with self.assertRaises(ValueError):
             builder.build()
+
+    def test_collision_literal_only_duplicate_slug(self):
+        """Literal-only table, same slug with DIFFERENT values → ValueError.
+
+        This catches the silent-failure bug where literal fields would
+        silently keep the first row's value while discarding subsequent
+        rows — causing wrong unit_price / weight in production.
+        """
+        rows = [
+            {"slug": "frame", "unit_price": 113000},
+            {"slug": "frame", "unit_price": 95000},  # Same slug, different value!
+        ]
+        builder = MultiTableFormulaBuilder(normalize_mode="scoped")
+        builder.add_table(
+            table_name="profiles",
+            rows=rows,
+            formula_fields=[],  # No formula fields — literal only
+            literal_fields=["unit_price"],
+            id_field="slug",
+        )
+        with self.assertRaises(ValueError) as ctx:
+            builder.build()
+        self.assertIn("TRÙNG TÊN BIẾN LITERAL", str(ctx.exception))
+
+    def test_collision_literal_same_value_no_error(self):
+        """Literal-only table, same slug with SAME value → OK (no real collision)."""
+        rows = [
+            {"slug": "frame", "unit_price": 113000},
+            {"slug": "frame", "unit_price": 113000},  # Same slug, same value → fine
+        ]
+        builder = MultiTableFormulaBuilder(normalize_mode="scoped")
+        builder.add_table(
+            table_name="profiles",
+            rows=rows,
+            formula_fields=["width"],
+            literal_fields=["unit_price"],
+            id_field="slug",
+        )
+        # Second row will collide on formula field before literal,
+        # so we need different test setup: only literal, no formula
+        builder2 = MultiTableFormulaBuilder(normalize_mode="scoped")
+        builder2.add_table(
+            table_name="prices",
+            rows=rows,
+            literal_fields=["unit_price"],
+            id_field="slug",
+        )
+        # Should NOT raise — same slug + same literal value is harmless
+        formulas, ctx = builder2.build()
+        self.assertEqual(ctx["prices__frame__unit_price"], 113000)
 
     def test_invalid_normalize_mode(self):
         with self.assertRaises(ValueError):

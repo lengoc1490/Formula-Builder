@@ -4,6 +4,7 @@
 import ast
 import hashlib
 import json
+import marshal
 import threading
 import time
 from collections import defaultdict, deque
@@ -156,7 +157,7 @@ class IncrementalContext:
 # ----------------------------------------------------------------------
 
 class FormulaEngineCore:
-    ENGINE_VERSION = "30.0.0"  # unified v30 (Phase 2.5)
+    ENGINE_VERSION = "31.0.0"  # unified v31 (MultiTableFormulaBuilder, composite sources, transform layer)
 
     def __init__(
         self,
@@ -231,20 +232,22 @@ class FormulaEngineCore:
         # Parser
         self._parser = FormulaParser(self._runtime_env, max_subscript_depth, _effective_iter_size)
 
-        # Parse all formulas
+        # Parse all formulas (v31: bytecode cache + regex dep detection)
         self._original_expr = {f["name"]: f["formula"] for f in formulas}
         self._ast_map = {}
         self._compiled = {}
 
         for f in formulas:
             name = f["name"]
-            tree = self._parser.parse(f["formula"])
-            self._ast_map[name] = tree
-            self._compiled[name] = self._parser.compile(tree, f"<formula:{name}>")
+            # Sử dụng parse_with_cache — cache hit trả về compiled bytecode ngay,
+            # cache miss thì parse + compile rồi lưu vào cache
+            self._compiled[name] = self._parser.parse_with_cache(
+                f["formula"], f"<formula:{name}>"
+            )
 
-        # Build dependency graph (v9 architecture)
+        # Build dependency graph (v31: regex-based fast path, no AST needed)
         self._graph = DependencyGraph()
-        self._graph.build(self._ast_map)
+        self._graph.build_from_exprs(self._original_expr)
         self._topo_order = self._graph.topological_sort()
 
         # v16: Complexity Guard
@@ -256,8 +259,16 @@ class FormulaEngineCore:
 
         formula_name_set = set(self._topo_order)
         self._input_edges: Dict[str, Set[str]] = defaultdict(set)
-        for fname, tree in self._ast_map.items():
-            used_names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        # Build input edges from formula text (regex, consistent with build_from_exprs)
+        # _ast_map may be empty when using parse_with_cache — use original expressions instead
+        import re as _re
+        _id_re = _re.compile(r'[a-zA-Z_]\w*')
+        _str_re = _re.compile(r"""(?:"[^"]*"|'[^']*')""")
+        _attr_re = _re.compile(r'\.[a-zA-Z_]\w*')
+        for fname, expr in self._original_expr.items():
+            clean = _str_re.sub('""', expr)
+            clean = _attr_re.sub('', clean)
+            used_names = set(_id_re.findall(clean))
             for var in used_names:
                 if var not in formula_name_set:
                     self._input_edges[var].add(fname)
@@ -397,6 +408,153 @@ class FormulaEngineCore:
             "groups": {k: list(v) for k, v in self._groups.items()},
             "meta": meta_dict,
         }
+
+    # ── Engine Serialization (v31) ──────────────────────────────────────────
+
+    def to_cache_bytes(self) -> bytes:
+        """Serialize engine to bytes for fast restore.
+
+        Marshals: formula names, original expressions, topo order,
+        compiled bytecode, and dependency info into a single bytes blob.
+        Restore with from_cache_bytes().
+
+        Returns:
+            bytes — packed engine state (marshal format)
+        """
+        payload = {
+            "v": 2,
+            "engine_version": self.ENGINE_VERSION,
+            "names": list(self._original_expr.keys()),
+            "exprs": {k: v for k, v in self._original_expr.items()},
+            "topo": self._topo_order,
+            "deps": {k: list(v) for k, v in self._deps_cache.items()},
+            "bytecodes": {k: marshal.dumps(self._compiled[k]) for k in self._topo_order},
+            # Store only serializable config, not runtime objects
+            "mode": self._mode,
+            "default": self._default,
+            "strict": self._strict,
+            "max_subscript_depth": self._max_subscript_depth,
+            "rounding_policy": self._rounding_policy,
+            "max_operations": self.max_operations,
+            "deterministic": self.deterministic,
+        }
+        return marshal.dumps(payload)
+
+    @classmethod
+    def from_cache_bytes(
+        cls,
+        data: bytes,
+        safe_funcs: Optional[Dict] = None,
+        **overrides,
+    ) -> "FormulaEngineCore":
+        """Restore engine from serialized bytes.
+
+        Args:
+            data: bytes from to_cache_bytes()
+            safe_funcs: runtime functions (cannot be serialized, must re-provide)
+            **overrides: override any stored config (e.g. on_error, deterministic)
+
+        Returns:
+            FormulaEngineCore instance — ready to calculate()
+        """
+        payload = marshal.loads(data)
+
+        if payload.get("v") != 2:
+            raise ValueError(f"Unsupported cache version: {payload.get('v')}")
+
+        # Create instance bypassing __init__ — we set everything manually
+        obj = cls.__new__(cls)
+
+        # Restore basic state
+        obj._original_expr = payload["exprs"]
+        obj._topo_order = payload["topo"]
+        obj._hash = hash_formulas([
+            {"name": k, "formula": v} for k, v in obj._original_expr.items()
+        ])
+
+        # Restore compiled bytecode
+        obj._compiled = {}
+        obj._ast_map = {}  # Empty — not needed for eval, only for explain/topo rebuild
+        for name in obj._topo_order:
+            obj._compiled[name] = marshal.loads(payload["bytecodes"][name])
+
+        # Restore dependency cache
+        obj._deps_cache = {
+            k: set(v) for k, v in payload.get("deps", {}).items()
+        }
+
+        # Rebuild _input_edges from expressions (consistent with __init__)
+        formula_name_set = set(obj._topo_order)
+        obj._input_edges = defaultdict(set)
+        import re as _re
+        _id_re = _re.compile(r'[a-zA-Z_]\w*')
+        _str_re = _re.compile(r"""(?:"[^"]*"|'[^']*')""")
+        _attr_re = _re.compile(r'\.[a-zA-Z_]\w*')
+        for fname, expr in obj._original_expr.items():
+            clean = _str_re.sub('""', expr)
+            clean = _attr_re.sub('', clean)
+            used_names = set(_id_re.findall(clean))
+            for var in used_names:
+                if var not in formula_name_set:
+                    obj._input_edges[var].add(fname)
+
+        # Restore config
+        obj._mode = payload.get("mode", MODE_DEFAULT)
+        obj._default = payload.get("default", 0)
+        obj._strict = payload.get("strict", True)
+        obj._max_subscript_depth = payload.get("max_subscript_depth", 5)
+        obj._rounding_policy = payload.get("rounding_policy")
+        obj.max_operations = payload.get("max_operations")
+        obj.deterministic = payload.get("deterministic", True)
+        obj._input_schema = {}
+        obj._output_schema = {}
+
+        # Apply overrides
+        for k, v in overrides.items():
+            if k == "on_error":
+                if v == "raise":
+                    obj._mode = MODE_RAISE
+                elif v == "null":
+                    obj._mode = MODE_NULL
+                else:
+                    obj._mode = MODE_DEFAULT
+            elif k == "deterministic":
+                obj.deterministic = v
+            elif k == "default_value":
+                obj._default = v
+
+        # Set up runtime env (cannot be serialized — contains callables)
+        from .funcs.registry import BASE_FUNCS
+        base = BASE_FUNCS.copy()
+        if safe_funcs:
+            base.update(safe_funcs)
+        obj._runtime_env = base
+
+        # Determine if deterministic
+        _is_deterministic = obj.deterministic
+        if _is_deterministic:
+            obj._runtime_env.pop("now", None)
+            obj._runtime_env.pop("today", None)
+            obj._runtime_env["unique"] = lambda it: sorted(set(it), key=str)
+            obj._runtime_env["count_unique"] = lambda iterable: len(set(iterable))
+
+        # Misc
+        obj._formulas = []
+        obj._meta = None
+        obj._tl = threading.local()
+        obj.max_formula_count = None
+        obj.max_dependency_depth = None
+        obj._max_iterable_size = None
+        obj._assertions = {}
+        obj._groups = {}
+        obj._last_errors = {}
+        obj._graph = None  # Not serialized; rebuild if needed
+        obj._parser = None  # Not serialized; created lazily if needed
+        obj._eval_globals = {
+            "__builtins__": {k: v for k, v in obj._runtime_env.items()},
+        }
+
+        return obj
 
     @property
     def last_errors(self) -> Dict[str, str]:

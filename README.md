@@ -2,7 +2,7 @@
 
 **Generic Excel-like formula engine and builder for Frappe Framework**
 
-> Version: **30.0.0** | License: MIT | Author: Lê Ngọc
+> Version: **31.0.0** | License: MIT | Author: Lê Ngọc
 
 ---
 
@@ -81,39 +81,39 @@
     - [13.8 Hybrid: builder + tự code](#138-hybrid-builder--tự-code)
     - [13.9 Bao quát trường hợp](#139-bao-quát-trường-hợp)
   - [14. Composite Source Types — Tổ hợp nguồn dữ liệu (v31)](#14-composite-source-types--tổ-hợp-nguồn-dữ-liệu-v31)
-    - [13.1 Pipeline — Chain tuần tự](#131-pipeline--chain-tuần-tự)
-    - [13.2 Conditional — Rẽ nhánh theo điều kiện](#132-conditional--rẽ-nhánh-theo-điều-kiện)
-    - [13.3 Fallback Chain — Graceful Degradation](#133-fallback-chain--graceful-degradation)
-    - [13.4 Nesting — Lồng ghép](#134-nesting--lồng-ghép)
-  - [14. Transform Layer — Biến đổi dữ liệu sau resolve (v31)](#14-transform-layer--biến-đổi-dữ-liệu-sau-resolve-v31)
+    - [14.1 Pipeline — Chain tuần tự](#141-pipeline--chain-tuần-tự)
+    - [14.2 Conditional — Rẽ nhánh theo điều kiện](#142-conditional--rẽ-nhánh-theo-điều-kiện)
+    - [14.3 Fallback Chain — Graceful Degradation](#143-fallback-chain--graceful-degradation)
+    - [14.4 Nesting — Lồng ghép](#144-nesting--lồng-ghép)
+  - [15. Transform Layer — Biến đổi dữ liệu sau resolve (v31)](#15-transform-layer--biến-đổi-dữ-liệu-sau-resolve-v31)
   - [16. Security](#16-security)
     - [Defense in Depth](#defense-in-depth)
     - [Rate Limits (configurable)](#rate-limits-configurable)
   - [17. Performance \& Caching](#17-performance--caching)
     - [Cache Architecture](#cache-architecture)
     - [Optimization Patterns](#optimization-patterns)
-  - [17. Integration Guide](#17-integration-guide)
+  - [18. Integration Guide](#18-integration-guide)
     - [Quick Start — Add Formula Field to a DocType](#quick-start--add-formula-field-to-a-doctype)
     - [Using the Frontend](#using-the-frontend)
     - [Formula Syntax Examples](#formula-syntax-examples)
     - [Integrating as a Calculation Engine](#integrating-as-a-calculation-engine)
     - [Registering Custom Data Sources](#registering-custom-data-sources)
-  - [18. Ví dụ theo ngành (v31)](#18-ví-dụ-theo-ngành-v31)
-    - [18.1 Nhôm Kính (AlumGlass)](#181-nhôm-kính-alumglass)
-    - [18.2 Sản xuất (Manufacturing)](#182-sản-xuất-manufacturing)
-    - [18.3 Healthcare](#183-healthcare)
-    - [18.4 Retail](#184-retail)
-    - [18.5 Xây dựng](#185-xây-dựng)
-  - [19. Hooks \& Lifecycle](#19-hooks--lifecycle)
+  - [19. Ví dụ theo ngành (v31)](#19-ví-dụ-theo-ngành-v31)
+    - [19.1 Nhôm Kính (AlumGlass)](#191-nhôm-kính-alumglass)
+    - [19.2 Sản xuất (Manufacturing)](#192-sản-xuất-manufacturing)
+    - [19.3 Healthcare](#193-healthcare)
+    - [19.4 Retail](#194-retail)
+    - [19.5 Xây dựng](#195-xây-dựng)
+  - [20. Hooks \& Lifecycle](#20-hooks--lifecycle)
     - [Install Lifecycle](#install-lifecycle)
-  - [20. Development Guide](#20-development-guide)
+  - [21. Development Guide](#21-development-guide)
     - [Setup](#setup)
     - [Code Quality](#code-quality)
     - [Testing](#testing)
     - [Adding a New Built-in Function](#adding-a-new-built-in-function)
     - [Adding a New Data Source Type](#adding-a-new-data-source-type)
     - [Extending the Frontend](#extending-the-frontend)
-  - [21. Roadmap / Future Work](#21-roadmap--future-work)
+  - [22. Roadmap / Future Work](#22-roadmap--future-work)
   - [License](#license)
   - [Author](#author)
 
@@ -1740,7 +1740,7 @@ engine = FormulaEngine(formulas=formulas, context=context)
 
 Three new source types that COMPOSE existing sources to solve complex data flow patterns without writing Python code.
 
-### 13.1 Pipeline — Chain tuần tự
+### 14.1 Pipeline — Chain tuần tự
 
 Chain multiple data sources: output of step N feeds into step N+1. Steps execute sequentially with shared context.
 
@@ -1781,7 +1781,7 @@ Chain multiple data sources: output of step N feeds into step N+1. Steps execute
 - `merge_strategy: "all"` returns all outputs as dict
 - Marked `@batchable` for query optimization
 
-### 13.2 Conditional — Rẽ nhánh theo điều kiện
+### 14.2 Conditional — Rẽ nhánh theo điều kiện
 
 Select a data source at runtime based on conditions. First matching branch wins.
 
@@ -1816,7 +1816,7 @@ Select a data source at runtime based on conditions. First matching branch wins.
 
 **Condition syntax:** Python expression evaluated in safe scope with resolved variables. Supports `and`, `or`, `not`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `in`, `is`. Invalid conditions are skipped gracefully.
 
-### 13.3 Fallback Chain — Graceful Degradation
+### 14.3 Fallback Chain — Graceful Degradation
 
 Try sources in order until one succeeds. Primary → fallback_1 → fallback_2 → ... → default.
 
@@ -1850,7 +1850,7 @@ Try sources in order until one succeeds. Primary → fallback_1 → fallback_2 �
 - `on_failure: "skip"` (default) continues to next link
 - All links fail → returns binding's `default_value`
 
-### 13.4 Nesting — Lồng ghép không giới hạn
+### 14.4 Nesting — Lồng ghép không giới hạn
 
 All three composite types can be nested arbitrarily:
 
@@ -1961,7 +1961,7 @@ Post-resolve data transformation applied automatically to any source type with `
 
 ---
 
-## 17. Integration Guide
+## 18. Integration Guide
 
 ### Quick Start — Add Formula Field to a DocType
 
@@ -2109,11 +2109,11 @@ def handle_custom(binding, doc, resolved):
 
 ---
 
-## 18. Ví dụ theo ngành (NEW v31)
+## 19. Ví dụ theo ngành (NEW v31)
 
 Formula Builder is a multi-industry platform. Below are detailed examples from different verticals — all using the same 13 source types, differing only in configuration.
 
-### 18.1 Nhôm Kính (AlumGlass)
+### 19.1 Nhôm Kính (AlumGlass)
 
 **Bài toán:** Tính giá 1 bộ cửa đi 2 cánh + ô kính transom từ 17 dòng vật tư.
 
@@ -2196,7 +2196,7 @@ def b2_prefetch_master_data(self):
 
 **Kết quả:** `GIA_VAT = 22,717,289 VND` cho cửa đi 2 cánh 2400×2600mm.
 
-### 18.2 Sản xuất (Manufacturing)
+### 19.2 Sản xuất (Manufacturing)
 
 **Bài toán:** Tính giá thành sản phẩm từ BOM nhiều cấp + chi phí sản xuất + phân bổ overhead.
 
@@ -2229,7 +2229,7 @@ def b2_prefetch_master_data(self):
 {"line_code": "GIA_THANH_SX", "calc_formula": "TONG_NVL + TONG_NC + TONG_SXC"}
 ```
 
-### 18.3 Healthcare
+### 19.3 Healthcare
 
 **Bài toán:** Tính liều thuốc theo cân nặng + độ tuổi + chức năng thận.
 
@@ -2249,7 +2249,7 @@ def b2_prefetch_master_data(self):
  ], "default": {"source_type": "computed", "source_config": {"formula": "weight * base_dose * 1.0", "dependencies": ["weight", "base_dose"]}}}}
 ```
 
-### 18.4 Retail
+### 19.4 Retail
 
 **Bài toán:** Tính giá bán lẻ từ giá nhập + margin theo category + format giá.
 
@@ -2277,7 +2277,7 @@ def b2_prefetch_master_data(self):
 }
 ```
 
-### 18.5 Xây dựng
+### 19.5 Xây dựng
 
 **Bài toán:** Dự toán công trình với đơn giá theo khu vực + resilience.
 
@@ -2303,7 +2303,7 @@ def b2_prefetch_master_data(self):
 
 ---
 
-## 19. Hooks & Lifecycle
+## 20. Hooks & Lifecycle
 
 **File:** `hooks.py`
 
@@ -2332,7 +2332,7 @@ bench install-app formula_builder
 
 ---
 
-## 20. Development Guide
+## 21. Development Guide
 
 ### Setup
 
@@ -2417,7 +2417,7 @@ formula_builder.formula.FunctionRegistry.addTemplate('My Category', {
 
 ---
 
-## 21. Roadmap / Future Work
+## 22. Roadmap / Future Work
 
 **v31 (Complete):**
 - [x] SourceTypeRegistry with auto-discovery from hooks.py

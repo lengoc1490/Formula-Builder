@@ -10,6 +10,10 @@ from .errors import FormulaError, ErrorCode
 from .security import SecurityValidator
 from .normalize import normalize_formula
 
+# Pre-compiled patterns for fast-path detection (v31 optimization)
+_RE_SIMPLE_REF = re.compile(r'^[a-zA-Z_]\w*$')
+_RE_SIMPLE_NUM = re.compile(r'^\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$')
+
 
 class DotToSubscriptTransformer(ast.NodeTransformer):
     ALLOWED_ATTRS = frozenset({'get', 'keys', 'values', 'items', 'to_dict'})
@@ -66,9 +70,26 @@ class FormulaParser:
         self._canonical_funcs: frozenset = frozenset(runtime_env.keys())
 
     def parse(self, formula: str) -> ast.Expression:
-        """Parse formula string to AST"""
+        """Parse formula string to AST — with fast-path for trivial formulas."""
         formula = normalize_formula(formula, self._canonical_funcs)
 
+        # ── Fast path: simple variable reference (e.g. "W_mm", "bucket_0") ──
+        if _RE_SIMPLE_REF.match(formula):
+            tree = ast.Expression(body=ast.Name(id=formula, ctx=ast.Load()))
+            ast.fix_missing_locations(tree)
+            return tree
+
+        # ── Fast path: simple numeric literal (e.g. "123", "1.5e3") ──
+        if _RE_SIMPLE_NUM.match(formula):
+            try:
+                val = int(formula)
+            except ValueError:
+                val = float(formula)
+            tree = ast.Expression(body=ast.Constant(value=val))
+            ast.fix_missing_locations(tree)
+            return tree
+
+        # ── Full path: complex formulas ──
         try:
             tree = ast.parse(formula, mode='eval')
         except SyntaxError as e:
@@ -136,3 +157,41 @@ class FormulaParser:
     def compile(self, tree: ast.Expression, filename: str = "<formula>") -> Any:
         """Compile AST to bytecode"""
         return compile(tree, filename=filename, mode="eval")
+
+    def parse_with_cache(self, formula: str, filename: str = "<formula>") -> Any:
+        """Parse + compile formula với bytecode cache.
+
+        Nếu formula đã được compile trước đó (cùng text + cùng runtime_env +
+        cùng security params), trả về kết quả từ cache mà không cần parse lại.
+
+        Cache key bao gồm max_subscript_depth và max_iterable_size để đảm bảo
+        2 engine với giới hạn bảo mật khác nhau KHÔNG dùng chung bytecode.
+
+        Returns:
+            Compiled code object (giống như gọi parse() rồi compile()).
+        """
+        from .bytecode_cache import get_cached, set_cached
+
+        func_names = tuple(sorted(self.runtime_env.keys()))
+
+        # Check cache (bao gồm security params trong key)
+        cached = get_cached(
+            formula, func_names,
+            max_subscript_depth=self.max_subscript_depth,
+            max_iterable_size=self.max_iterable_size,
+        )
+        if cached is not None:
+            return cached
+
+        # Cache miss → parse + compile
+        tree = self.parse(formula)
+        code_obj = self.compile(tree, filename)
+
+        # Store in cache (bao gồm security params trong key)
+        set_cached(
+            formula, func_names, code_obj,
+            max_subscript_depth=self.max_subscript_depth,
+            max_iterable_size=self.max_iterable_size,
+        )
+
+        return code_obj
