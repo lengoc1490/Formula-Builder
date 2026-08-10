@@ -127,6 +127,14 @@ class FormulaRuntimeError(FormulaError):
         self.code = "ENGINE.RUNTIME_ERROR"
 
 
+class FormulaZeroDivisionError(FormulaError):
+    """Chia cho 0 trong công thức. Luôn FATAL, không phụ thuộc on_error mode."""
+    def __init__(self, message: str, field_name: str = None, formula: str = None,
+                    error: Exception = None, context: Optional[Dict[str, Any]] = None):
+        super().__init__(message, code=ErrorCode.DIVISION_BY_ZERO, level="FATAL",
+                            field_name=field_name, formula=formula, error=error, context=context)
+        self.code = "ENGINE.DIVISION_BY_ZERO"
+
 class FormulaValidationError(FormulaError):
     def __init__(self, message: str, errors: List[str] = None):
         self.validation_errors = errors or []
@@ -172,6 +180,7 @@ class FormulaAssertionError(FormulaError):
 
 _ERROR_TYPE_MAP: Dict[type, str] = {
     FormulaBudgetExceeded:    "budget_exceeded",
+    FormulaZeroDivisionError: "zero_division", 
     FormulaComplexityError:   "complexity_error",
     FormulaLimitError:        "limit_exceeded",
     FormulaRuntimeError:      "runtime_error",

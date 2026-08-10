@@ -5,15 +5,32 @@ import ast
 import hashlib
 import json
 import marshal
+import sys
 import threading
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple, Union, Iterable
+from typing import (
+    Any, Dict, 
+    List, Optional, 
+    Set, Tuple, 
+    Union, Iterable
+)
 
-from .errors import FormulaError, ErrorCode, FormulaBudgetExceeded, FormulaComplexityError
+from .errors import (
+    FormulaError, 
+    ErrorCode, 
+    FormulaBudgetExceeded, 
+    FormulaComplexityError,
+    FormulaZeroDivisionError,
+)
 from .types import (
-    FormulaSetMeta, InputField, OutputField, IncrementalStats, Assertion, AuditLevel,
+    FormulaSetMeta, 
+    InputField, 
+    OutputField, 
+    IncrementalStats, 
+    Assertion, 
+    AuditLevel,
     ValidationResult
 )
 from .normalize import hash_formulas
@@ -29,7 +46,23 @@ from .topo import DependencyGraph
 MODE_RAISE = 1
 MODE_NULL = 2
 MODE_DEFAULT = 3
+DEFAULT_ZERO_DIVISION_POLICY: str = "raise" # "raise" (Cảnh báo chặn)/ "warn" (Báo lỗi)/ "allow" (Bỏ qua lỗi)
 
+
+def _notify_frappe(kind: str, message: str, **kwargs) -> None:
+    """Best-effort gửi thông báo qua Frappe NẾU frappe đã được nạp sẵn trong
+    tiến trình hiện tại (sys.modules) — KHÔNG import frappe ở module level,
+    nên engine_core.py vẫn chạy độc lập ngoài Frappe (unit test, script rời)."""
+    frappe = sys.modules.get("frappe")
+    if frappe is None:
+        return
+    try:
+        if kind == "msgprint":
+            frappe.msgprint(message, **kwargs)
+        elif kind == "log_error":
+            frappe.log_error(message, kwargs.get("title", "Formula Engine"))
+    except Exception:
+        pass
 
 # ----------------------------------------------------------------------
 # Sentinel for missing values
@@ -180,6 +213,7 @@ class FormulaEngineCore:
         max_formula_count: Optional[int] = None,
         max_dependency_depth: Optional[int] = None,
         deterministic: bool = True,
+        zero_division_policy: Optional[str] = None,
     ):
         # Basic setup
         self._formulas = formulas
@@ -195,6 +229,13 @@ class FormulaEngineCore:
         self.max_formula_count = max_formula_count
         self.max_dependency_depth = max_dependency_depth
         self.deterministic = deterministic
+
+        # ── THÊM MỚI: Zero-Division Policy ──────────────────────────────────
+        _zdp = zero_division_policy if zero_division_policy is not None else DEFAULT_ZERO_DIVISION_POLICY
+        if _zdp not in ("raise", "warn", "allow"):
+            raise ValueError("zero_division_policy phải là 'raise' | 'warn' | 'allow'")
+        self._zero_division_policy = _zdp
+        self._zero_division_warnings: List[Dict[str, str]] = []
 
         # Error handling mode
         if on_error == "raise":
@@ -370,6 +411,49 @@ class FormulaEngineCore:
                 ops=self._tl._op_counter,
                 limit=self.max_operations,
             )
+
+
+    def _handle_zero_division(self, name: str, e: ZeroDivisionError, ctx: Dict[str, Any]) -> Any:
+        """Được gọi từ calculate() / create_context() / calculate_incremental() /
+        recalculate_full(). Sửa self._zero_division_policy là đủ cho MỌI nơi
+        gọi engine — không cần sửa các hàm gọi khác (calculate_batch, explain,
+        FormulaEngineTrace, FormulaEngineAudit, calculate_safe...)."""
+        formula_text = self._original_expr.get(name, "")
+        policy = self._zero_division_policy
+
+        if policy == "allow":
+            self._last_errors[name] = str(e)
+            if self._mode == MODE_RAISE:
+                raise FormulaError(
+                    f"Evaluation failed for {name!r} (division by zero)",
+                    field_name=name, formula=formula_text, error=e, context=ctx,
+                    code=ErrorCode.INVALID_TYPE) from e
+            return None if self._mode == MODE_NULL else self._default
+
+        msg = (
+            f"Công thức '{name}' bị lỗi chia cho 0 (formula: {formula_text}). "
+            f"Kiểm tra lại dữ liệu đầu vào, hoặc dùng safe_div(a, b, default) "
+            f"thay vì chia trực tiếp."
+        )
+        self._last_errors[name] = msg
+        self._zero_division_warnings.append({
+            "field": name, "formula": formula_text, "message": msg,
+        })
+
+        if policy == "warn":
+            _notify_frappe("msgprint", msg, title="Cảnh báo công thức",
+                            indicator="orange", alert=True)
+            return self._default
+
+        # policy == "raise" (mặc định) — pure Python exception, Frappe tự bắt
+        raise FormulaZeroDivisionError(
+            msg, field_name=name, formula=formula_text, error=e, context=ctx) from e
+
+    def get_zero_division_warnings(self) -> List[Dict[str, str]]:
+        """Danh sách cảnh báo chia-0 của lần calculate() gần nhất
+        (chỉ có dữ liệu khi zero_division_policy='warn'). Nơi gọi engine
+        (đã import frappe) có thể tự đọc để msgprint tuỳ ý."""
+        return list(self._zero_division_warnings)
 
     # ------------------------------------------------------------------
     # Public methods
@@ -674,6 +758,8 @@ class FormulaEngineCore:
                 local[name] = eval(_compiled[name], _eval_globals, local)
             except FormulaBudgetExceeded:
                 raise
+            except ZeroDivisionError as e:
+                local[name] = self._handle_zero_division(name, e, local)
             except Exception as e:
                 error_msg = str(e)
                 self._last_errors[name] = error_msg
@@ -774,6 +860,8 @@ class FormulaEngineCore:
                 val = eval(self._compiled[name], self._eval_globals, ictx._ctx)
             except FormulaBudgetExceeded:
                 raise
+            except ZeroDivisionError as e: 
+                val = self._handle_zero_division(name, e, ictx._ctx)
             except Exception as e:
                 if self._mode == MODE_RAISE:
                     raise FormulaError(
@@ -847,6 +935,8 @@ class FormulaEngineCore:
                 val = eval(self._compiled[name], self._eval_globals, ictx._ctx)
             except FormulaBudgetExceeded:
                 raise
+            except ZeroDivisionError as e:
+                val = self._handle_zero_division(name, e, ictx._ctx)
             except Exception as e:
                 if self._mode == MODE_RAISE:
                     raise FormulaError(
@@ -897,6 +987,8 @@ class FormulaEngineCore:
                 val = eval(self._compiled[name], self._eval_globals, ictx._ctx)
             except FormulaBudgetExceeded:
                 raise
+            except ZeroDivisionError as e:
+                val = self._handle_zero_division(name, e, ictx._ctx)
             except Exception as e:
                 if self._mode == MODE_RAISE:
                     raise FormulaError(
