@@ -556,11 +556,10 @@ class FormulaEngineCore:
             {"name": k, "formula": v} for k, v in obj._original_expr.items()
         ])
 
-        # Restore compiled bytecode
+        # Restore compiled bytecode — PIVOT RCE: KHÔNG tin `bytecodes` từ payload.
+        # Compiled bytecode được recompile từ source (đã validate) bên dưới.
         obj._compiled = {}
         obj._ast_map = {}  # Empty — not needed for eval, only for explain/topo rebuild
-        for name in obj._topo_order:
-            obj._compiled[name] = marshal.loads(payload["bytecodes"][name])
 
         # Restore dependency cache
         obj._deps_cache = {
@@ -634,9 +633,28 @@ class FormulaEngineCore:
         obj._last_errors = {}
         obj._graph = None  # Not serialized; rebuild if needed
         obj._parser = None  # Not serialized; created lazily if needed
-        obj._eval_globals = {
-            "__builtins__": {k: v for k, v in obj._runtime_env.items()},
-        }
+        obj._eval_globals = dict(obj._runtime_env)
+        obj._eval_globals["__builtins__"] = {}
+        if _is_deterministic:
+            obj._eval_globals.pop("now", None)
+            obj._eval_globals.pop("today", None)
+
+        # Pivot RCE 2026-08-16: GATE VALIDATE TẠI RESTORE — compiled bytecode
+        # KHÔNG tin từ serialized cache. Recompile toàn bộ từ formula SOURCE
+        # bằng FormulaParser.parse() (chính là gate mà __init__ dùng: normalize +
+        # SecurityValidator + genexp + func whitelist) rồi compile(). Đảm bảo
+        # bytecode eval trong hot loop LUÔN là bytecode của source đã validate.
+        # (Perf: ~1.3ms cho 10 formulas — tương đương marshal.loads cũ; bytecode
+        # cache warm còn nhanh hơn.)
+        from .parser import FormulaParser as _RestoreParser
+        _rp = _RestoreParser(
+            obj._runtime_env,
+            obj._max_subscript_depth or 5,
+            obj._max_iterable_size or 2 ** 31,
+        )
+        for _name in obj._topo_order:
+            _tree = _rp.parse(obj._original_expr[_name])
+            obj._compiled[_name] = _rp.compile(_tree, f"<formula:{_name}>")
 
         return obj
 

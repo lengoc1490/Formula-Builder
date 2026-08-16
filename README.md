@@ -1913,6 +1913,8 @@ Post-resolve data transformation applied automatically to any source type with `
 | Layer | Implementation | File |
 |---|---|---|
 | **AST Security** | Forbidden node types, names, dunder attrs | `security.py` |
+| **Safe Eval (user-controlled)** | `filter_expr`/`condition`/`transform.formula` validate-1-lần qua `safe_eval` (chặn dunder attr, method call, import, lambda; eval trên compiled code, globals rỗng) | `security/safe_eval.py` |
+| **Cache-restore gate** | Engine `from_cache_bytes`/`from_cache_dict` recompile từ source đã validate — KHÔNG tin bytecode serialized | `engine_core.py`, `engine_public.py` |
 | **Function Whitelist** | Only functions in `allowed_functions` child table | `settings_cache.py` |
 | **Module Whitelist** | Custom function imports restricted to configured prefixes | `data_source_registry.py` |
 | **DB Query Whitelist** | Only doctypes in `db_query_allowed_doctypes` can be queried | `variable_resolver.py` |

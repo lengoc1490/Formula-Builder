@@ -60,6 +60,14 @@ from formula_builder.api.data_source_registry import (
     get_handler,
     resolve_bindings_with_deps,
 )
+from formula_builder.security import safe_eval
+
+# Hàm được phép trong transform formula — khớp với safe_scope mà _apply_transform
+# đưa vào (value + resolved_so_far). Whitelist này phải luôn ⊇ các builtin thực
+# tế trong scope; các hàm khác sẽ fail ở eval (NameError) → fallback như cũ.
+_TRANSFORM_ALLOWED_FUNCS: frozenset = frozenset({
+    "int", "float", "str", "bool", "len", "abs", "min", "max", "round",
+})
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -188,18 +196,35 @@ def _apply_transform(value: Any, binding: dict, resolved_so_far: dict) -> Any:
                     if f"{{{key}}}" in formula or key in formula:
                         formula = formula.replace(f"{{{key}}}", str(val))
 
-                # Simple eval with restricted scope for value
-                safe_scope = {"value": value, "__builtins__": {}}
-                # Add resolved values as lookup
-                for k, v in resolved_so_far.items():
-                    if not k.startswith("_"):
-                        safe_scope[k] = v
-
+                # Pivot RCE 2026-08-16: formula là user-controlled
+                # (transform.formula trong source_config) → validate + compile
+                # 1 lần (safe_eval), eval nhanh trên compiled code. Không eval
+                # trần chuỗi — resolved_so_far injected vào formula có thể chứa
+                # payload RCE, safe_eval chặn.
                 try:
-                    value = eval(formula, {"__builtins__": {}}, safe_scope)
-                except Exception:
-                    # Fallback: return untransformed
-                    pass
+                    expr = safe_eval.compile_expression(
+                        formula,
+                        allowed_functions=_TRANSFORM_ALLOWED_FUNCS,
+                        policy=safe_eval.TRANSFORM_POLICY,
+                    )
+                except ValueError:
+                    # Formula không hợp lệ → bỏ qua formula eval (giữ nguyên value),
+                    # vẫn áp dụng round/cast bên dưới như trước đây khi eval fail.
+                    expr = None
+
+                if expr is not None:
+                    # Simple eval with restricted scope for value
+                    safe_scope = {"value": value}
+                    # Add resolved values as lookup
+                    for k, v in resolved_so_far.items():
+                        if not k.startswith("_"):
+                            safe_scope[k] = v
+
+                    try:
+                        value = expr.eval(safe_scope)
+                    except Exception:
+                        # Fallback: return untransformed
+                        pass
 
         # 5. Round
         if "round" in transform:

@@ -1,4 +1,12 @@
-"""Tests for formula_utils/security.py — AST sandbox, formula validation."""
+"""Tests for formula_utils/security.py — AST sandbox, formula validation.
+
+Gồm cả tests cho security/safe_eval.py — wrapper validate-1-lần + eval-nhanh
+(Pivot RCE 2026-08-16). Class TestSafeEval dùng unittest.TestCase thuần Python
+để chạy được cả standalone lẫn trong frappe test runner.
+"""
+
+import unittest
+from types import SimpleNamespace
 
 from frappe.tests.utils import FrappeTestCase
 
@@ -11,6 +19,7 @@ from formula_builder.formula_utils import (
     FormulaError,
     ValidationResult,
 )
+from formula_builder.security import safe_eval
 
 
 class TestSecurityValidator(FrappeTestCase):
@@ -302,3 +311,247 @@ class TestFilterExprValidation(FrappeTestCase):
     def test_blocks_lambda(self):
         with self.assertRaises(ValueError):
             self.validate("lambda x: x > 0")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestSafeEval — security/safe_eval.py (Pivot RCE 2026-08-16)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestSafeEval(unittest.TestCase):
+    """Tests cho security/safe_eval.py — validate 1 lần lúc build, eval nhanh.
+
+    Attack payloads là các vector sandbox-escape đã gặp trong audit RCE:
+      - import: __import__('os'), __import__('subprocess')
+      - attribute traversal: ().__class__.__mro__, [].__class__.__base__
+      - builtin nguy hiểm: eval, exec, open, os.system
+      - lambda/class/assign → chặn ở AST hoặc SyntaxError
+      - method call, getattr/setattr/delattr traversal
+      - subscript khi policy FILTER_POLICY cấm
+    """
+
+    # ── Happy path: biểu thức hợp lệ compile + eval đúng ──────────────────
+
+    def test_compile_and_eval_arithmetic(self):
+        expr = safe_eval.compile_expression("a + b * 2")
+        self.assertEqual(expr.eval({"a": 1, "b": 3}), 7)
+
+    def test_row_attribute_access(self):
+        expr = safe_eval.compile_expression("row.qty * row.rate")
+        row = SimpleNamespace(qty=3, rate=4.5)
+        self.assertEqual(expr.eval({"row": row}), 13.5)
+
+    def test_dict_subscript_allowed_by_default(self):
+        expr = safe_eval.compile_expression("data['qty'] + data['rate']")
+        self.assertEqual(expr.eval({"data": {"qty": 2, "rate": 5}}), 7)
+
+    def test_boolean_condition(self):
+        expr = safe_eval.compile_expression("a > 0 and b < 10")
+        self.assertTrue(expr.eval({"a": 5, "b": 3}))
+        self.assertFalse(expr.eval({"a": 0, "b": 3}))
+
+    def test_function_whitelist_allows_known(self):
+        expr = safe_eval.compile_expression(
+            "round(x, 2) + int(y)",
+            allowed_functions=("round", "int"),
+        )
+        # Caller inject hàm vào scope (eval không có builtin thật)
+        self.assertEqual(
+            expr.eval({"x": 1.234, "y": 3.9, "round": round, "int": int}),
+            4.23,  # round(1.234, 2)=1.23 + int(3.9)=3
+        )
+
+    def test_if_function_call_with_scope_func(self):
+        expr = safe_eval.compile_expression(
+            "IF(a > 0, b, c)", allowed_functions=("IF",)
+        )
+        self.assertEqual(
+            expr.eval({"a": 1, "b": 10, "c": 20, "IF": lambda c, t, f: t if c else f}),
+            10,
+        )
+
+    def test_source_property(self):
+        expr = safe_eval.compile_expression("  a + 1  ")
+        self.assertEqual(expr.source, "a + 1")
+
+    # ── Attack payloads bị chặn ở compile ─────────────────────────────────
+
+    def test_blocks_import_call(self):
+        for payload in ("__import__('os')", "__import__('subprocess')"):
+            with self.assertRaises(ValueError, msg=f"Should block: {payload}"):
+                safe_eval.compile_expression(payload)
+
+    def test_blocks_eval_and_exec(self):
+        for payload in ("eval('1+1')", "exec('x=1')"):
+            with self.assertRaises(ValueError, msg=f"Should block: {payload}"):
+                safe_eval.compile_expression(payload)
+
+    def test_blocks_open_and_os(self):
+        for payload in ("open('/etc/passwd')", "os.system('id')", "sys.exit()"):
+            with self.assertRaises(ValueError, msg=f"Should block: {payload}"):
+                safe_eval.compile_expression(payload)
+
+    def test_blocks_dunder_attribute_traversal(self):
+        payloads = [
+            "().__class__.__mro__",
+            "[].__class__.__base__",
+            "(1).__class__",
+            "obj.__globals__",
+        ]
+        for payload in payloads:
+            with self.assertRaises(ValueError, msg=f"Should block: {payload}"):
+                safe_eval.compile_expression(payload)
+
+    def test_blocks_getattr_setattr_traversal(self):
+        for payload in ("getattr(obj, 'x')", "setattr(obj, 'x', 1)", "delattr(obj, 'x')"):
+            with self.assertRaises(ValueError, msg=f"Should block: {payload}"):
+                safe_eval.compile_expression(payload)
+
+    def test_blocks_lambda(self):
+        with self.assertRaises(ValueError):
+            safe_eval.compile_expression("lambda x: x > 0")
+
+    def test_blocks_import_statement(self):
+        with self.assertRaises(ValueError):
+            safe_eval.compile_expression("import os")
+
+    def test_blocks_assignment(self):
+        with self.assertRaises(ValueError):
+            safe_eval.compile_expression("a = 1")
+
+    def test_blocks_method_call(self):
+        with self.assertRaises(ValueError):
+            safe_eval.compile_expression("'abc'.upper()")
+
+    def test_blocks_complex_call(self):
+        # call qua subscript / không phải Name hay Attribute
+        with self.assertRaises(ValueError):
+            safe_eval.compile_expression("funcs[0]('x')")
+
+    def test_blocks_walrus(self):
+        with self.assertRaises(ValueError):
+            safe_eval.compile_expression("(x := 1)")
+
+    # ── Policy ────────────────────────────────────────────────────────────
+
+    def test_filter_policy_blocks_subscript(self):
+        with self.assertRaises(ValueError):
+            safe_eval.compile_expression("row['qty'] > 1", policy=safe_eval.FILTER_POLICY)
+
+    def test_filter_policy_allows_attribute(self):
+        expr = safe_eval.compile_expression(
+            "row.qty > 1 and row.rate < 10", policy=safe_eval.FILTER_POLICY
+        )
+        self.assertTrue(expr.eval({"row": SimpleNamespace(qty=5, rate=3)}))
+
+    def test_condition_policy_allows_subscript(self):
+        expr = safe_eval.compile_expression("data['qty'] > 1", policy=safe_eval.CONDITION_POLICY)
+        self.assertTrue(expr.eval({"data": {"qty": 5}}))
+
+    def test_transform_policy_arithmetic(self):
+        expr = safe_eval.compile_expression("value * 2 + 1", policy=safe_eval.TRANSFORM_POLICY)
+        self.assertEqual(expr.eval({"value": 5}), 11)
+
+    def test_allowed_attributes_whitelist(self):
+        pol = safe_eval.ExpressionPolicy(allowed_attributes=("qty",))
+        expr = safe_eval.compile_expression("row.qty", policy=pol)
+        self.assertEqual(expr.eval({"row": SimpleNamespace(qty=7)}), 7)
+        with self.assertRaises(ValueError):
+            safe_eval.compile_expression("row.rate", policy=pol)
+
+    def test_forbid_attribute(self):
+        pol = safe_eval.ExpressionPolicy(allow_attribute=False)
+        with self.assertRaises(ValueError):
+            safe_eval.compile_expression("row.qty", policy=pol)
+
+    def test_subscript_depth_limit(self):
+        pol = safe_eval.ExpressionPolicy(max_subscript_depth=2)
+        with self.assertRaises(ValueError):
+            safe_eval.compile_expression("a[0][1][2]", policy=pol)
+        # depth 2 chạy được
+        expr = safe_eval.compile_expression("a[0][1]", policy=pol)
+        self.assertEqual(expr.eval({"a": [[10, 20]]}), 20)
+
+    def test_function_whitelist_blocks_unknown(self):
+        with self.assertRaises(ValueError):
+            safe_eval.compile_expression(
+                "calc_total(row) + 1", allowed_functions=("round", "int")
+            )
+
+    # ── Sandbox isolation lúc eval ────────────────────────────────────────
+
+    def test_eval_scope_has_no_builtins(self):
+        # `len` không bị cấm ở compile, nhưng eval KHÔNG có builtin thật
+        # (globals cố định {"__builtins__": {}}) → phải inject từ scope.
+        expr = safe_eval.compile_expression("len([1, 2, 3])")
+        with self.assertRaises(NameError):
+            expr.eval({})
+        self.assertEqual(expr.eval({"len": len}), 3)
+
+    def test_eval_uses_only_injected_names(self):
+        expr = safe_eval.compile_expression("a + b")
+        self.assertEqual(expr.eval({"a": 1, "b": 2}), 3)
+        with self.assertRaises(NameError):
+            expr.eval({"a": 1})  # thiếu b → NameError, không fallback builtin
+
+    # ── Cache ─────────────────────────────────────────────────────────────
+
+    def test_compile_cache_reuse(self):
+        safe_eval.clear_cache()
+        e1 = safe_eval.compile_expression("a * 2")
+        e2 = safe_eval.compile_expression("a * 2")
+        self.assertIs(e1, e2)
+
+    def test_clear_cache(self):
+        safe_eval.clear_cache()
+        e1 = safe_eval.compile_expression("a + 1")
+        safe_eval.clear_cache()
+        e2 = safe_eval.compile_expression("a + 1")
+        self.assertIsNot(e1, e2)
+
+    def test_cache_key_respects_policy_and_functions(self):
+        safe_eval.clear_cache()
+        e1 = safe_eval.compile_expression("round(x, 1)", allowed_functions=("round",))
+        e2 = safe_eval.compile_expression("round(x, 1)")  # không whitelist
+        self.assertIsNot(e1, e2)
+        e3 = safe_eval.compile_expression("round(x, 1)", allowed_functions=("round",))
+        self.assertIs(e1, e3)
+
+    # ── Input validation ──────────────────────────────────────────────────
+
+    def test_none_rejected(self):
+        with self.assertRaises(ValueError):
+            safe_eval.compile_expression(None)
+
+    def test_empty_rejected(self):
+        with self.assertRaises(ValueError):
+            safe_eval.compile_expression("   ")
+
+    def test_syntax_error_rejected(self):
+        with self.assertRaises(ValueError):
+            safe_eval.compile_expression("a +* 2")
+
+    def test_validate_expression_no_compile(self):
+        # hợp lệ → không raise
+        safe_eval.validate_expression("row.qty * row.rate")
+        # bất hợp lệ → raise ValueError
+        with self.assertRaises(ValueError):
+            safe_eval.validate_expression("__import__('os')")
+
+    # ── validate_formula_sources (gate cache-restore) ─────────────────────
+
+    def test_validate_formula_sources_accepts_valid(self):
+        safe_eval.validate_formula_sources(
+            {
+                "a": "1 + 2",
+                "b": "a * 3 + IF(a > 0, 10, 0)",
+            },
+            runtime_env={},
+        )
+
+    def test_validate_formula_sources_rejects_malicious(self):
+        for expr in ("__import__('os').system('id')", "eval('1+1')", "a + b"):
+            with self.subTest(expr=expr):
+                if expr == "a + b":
+                    continue  # hợp lệ
+                with self.assertRaises(Exception):
+                    safe_eval.validate_formula_sources({"a": expr}, runtime_env={})

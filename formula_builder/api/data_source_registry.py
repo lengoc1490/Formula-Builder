@@ -11,7 +11,6 @@ Each handler is registered via @register_source(source_type) and receives:
 """
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 import importlib
@@ -20,6 +19,8 @@ from collections import defaultdict, deque
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import frappe
+
+from formula_builder.security import safe_eval
 
 # ── Registry storage ─────────────────────────────────────────────────────────
 _data_source_handlers: Dict[str, Callable] = {}
@@ -165,6 +166,13 @@ _filter_allowed_calls_cache: Optional[frozenset] = None
 _filter_safe_globals_cache: Optional[dict] = None
 
 
+# Hàm được phép trong condition (conditional source_type) — khớp với safe_scope
+# mà handler đưa vào. Whitelist này phải luôn ⊇ các builtin thực tế trong scope.
+_CONDITION_ALLOWED_FUNCS: frozenset = frozenset({
+    "int", "float", "str", "bool", "len", "abs", "min", "max", "round",
+})
+
+
 def _get_filter_context() -> tuple:
     """Lazy-build allowed function names + safe_globals từ Formula Builder Settings.
 
@@ -208,8 +216,11 @@ def _invalidate_filter_context_cache() -> None:
     _filter_safe_globals_cache = None
 
 
-def _validate_filter_expr(filter_expr: str) -> None:
-    """Validate filter expression cho child_table_aggregate.
+def _compile_filter_expr(filter_expr: str) -> "safe_eval.SafeExpression":
+    """Validate + compile filter expression cho child_table_aggregate.
+
+    Pivot RCE 2026-08-16: thay eval trần bằng safe_eval — validate 1 lần lúc
+    build/compile, eval nhanh hot loop trên compiled code.
 
     Cho phép TOÀN BỘ hàm từ formula_utils BASE_FUNCS (~80+ hàm):
       - row.field, row.qty > 0, row.rate * row.qty
@@ -226,74 +237,33 @@ def _validate_filter_expr(filter_expr: str) -> None:
       - Dunder attributes (row.__class__, row.__dict__, ...)
       - Subscript (row['field'] — dùng row.field thay thế)
       - Method calls (obj.method() style)
+      - Hàm ngoài whitelist settings (single source of truth: get_allowed_funcs)
+
+    Raises:
+        ValueError: nếu filter_expr chứa cấu trúc nguy hiểm.
+    """
+    if not filter_expr or not filter_expr.strip():
+        raise ValueError("Filter expression cannot be empty.")
+    allowed_calls, _ = _get_filter_context()
+    return safe_eval.compile_expression(
+        filter_expr,
+        allowed_functions=allowed_calls,
+        policy=safe_eval.FILTER_POLICY,
+    )
+
+
+def _validate_filter_expr(filter_expr: str) -> None:
+    """Validate filter expression cho child_table_aggregate.
+
+    Delegate sang safe_eval (validate 1 lần lúc build — compile được reuse
+    trong handler qua _compile_filter_expr).
 
     Raises:
         ValueError: nếu filter_expr chứa cấu trúc nguy hiểm.
     """
     if not filter_expr or not filter_expr.strip():
         return
-
-    # 1. Parse AST
-    try:
-        tree = ast.parse(filter_expr.strip(), mode="eval")
-    except SyntaxError as e:
-        raise ValueError(f"Filter expression syntax error: {e.msg}") from e
-
-    # 2. Walk AST — kiểm tra từng node
-    allowed_calls, _ = _get_filter_context()
-
-    for node in ast.walk(tree):
-        node_type = type(node).__name__
-
-        # --- Chặn forbidden node types ---
-        if node_type in _FILTER_FORBIDDEN_NODES:
-            raise ValueError(
-                f"Forbidden operation '{node_type}' in filter expression."
-            )
-
-        # --- Kiểm tra Name (biến, hằng) ---
-        if node_type == "Name":
-            name = node.id  # type: ignore[attr-defined]
-            if name in _FILTER_FORBIDDEN_NAMES:
-                raise ValueError(
-                    f"Forbidden name '{name}' in filter expression."
-                )
-            # Tất cả các tên khác đều được phép — eval context đã giới hạn scope
-
-        # --- Kiểm tra Attribute (row.field) ---
-        if node_type == "Attribute":
-            attr = node.attr  # type: ignore[attr-defined]
-            if attr.startswith("__"):
-                raise ValueError(
-                    f"Dunder attribute '.{attr}' is not allowed in filter. "
-                    "Use normal field names like row.qty, row.rate."
-                )
-            # Attribute hợp lệ — tiếp tục
-
-        # --- Kiểm tra Call (gọi hàm) ---
-        if node_type == "Call":
-            if isinstance(node.func, ast.Name):  # type: ignore[attr-defined]
-                fname = node.func.id  # type: ignore[attr-defined]
-                if fname not in allowed_calls:
-                    raise ValueError(
-                        f"Function '{fname}()' is not available. "
-                        "Check Formula Builder Settings for enabled functions."
-                    )
-            elif isinstance(node.func, ast.Attribute):  # type: ignore[attr-defined]
-                raise ValueError(
-                    "Method calls (e.g. obj.method()) are not allowed in filter."
-                )
-            else:
-                raise ValueError(
-                    "Complex call expressions are not allowed in filter."
-                )
-
-        # --- Chặn Subscript (row['field']) ---
-        if node_type == "Subscript":
-            raise ValueError(
-                "Subscript access (e.g. row['field']) is not allowed in filter. "
-                "Use row.field_name instead."
-            )
+    _compile_filter_expr(filter_expr)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -563,9 +533,11 @@ def _handle_child_table_aggregate(binding: dict, doc, resolved_so_far: dict) -> 
         return 0 if aggregate == "count" else ([] if aggregate == "list" else None)
 
     if filter_expr:
-        # Validate filter expression AST security trước khi eval
+        # Pivot RCE 2026-08-16: validate + compile 1 lần lúc build (safe_eval),
+        # eval nhanh hot loop trên compiled code — KHÔNG eval trần chuỗi
+        # user-controlled (filter_expr từ source_config).
         try:
-            _validate_filter_expr(filter_expr)
+            safe_filter = _compile_filter_expr(filter_expr)
         except ValueError as e:
             frappe.log_error(
                 f"Filter expression rejected for '{binding.get('variable_name')}': {e}",
@@ -581,7 +553,7 @@ def _handle_child_table_aggregate(binding: dict, doc, resolved_so_far: dict) -> 
         for r in rows:
             safe_globals["row"] = r
             try:
-                if eval(filter_expr, {"__builtins__": {}}, safe_globals):
+                if safe_filter.eval(safe_globals):
                     filtered.append(r)
             except Exception:
                 pass
@@ -1062,17 +1034,32 @@ def _handle_conditional(binding: dict, doc, resolved_so_far: dict) -> Any:
         else:
             condition = "True"
 
+        # Pivot RCE 2026-08-16: condition là user-controlled (branches[].condition
+        # trong source_config) → validate + compile 1 lần (safe_eval), eval nhanh
+        # trên compiled code. Không eval trần chuỗi.
+        try:
+            cond_expr = safe_eval.compile_expression(
+                condition,
+                allowed_functions=_CONDITION_ALLOWED_FUNCS,
+                policy=safe_eval.CONDITION_POLICY,
+            )
+        except ValueError as e:
+            frappe.log_error(
+                f"Conditional: condition rejected '{condition_raw}': {e}",
+                "DataSource: conditional",
+            )
+            continue
+
         try:
             # Evaluate condition in a safe scope
-            safe_scope = {"__builtins__": {}}
-            safe_scope.update(resolved_so_far)
+            safe_scope = dict(resolved_so_far)
             safe_scope.update({
                 "True": True, "False": False, "None": None,
                 "int": int, "float": float, "str": str, "bool": bool,
                 "len": len, "abs": abs, "min": min, "max": max,
                 "round": round,
             })
-            result = eval(condition, {"__builtins__": {}}, safe_scope)
+            result = cond_expr.eval(safe_scope)
             if result:
                 # This branch matches → use its source
                 branch_source_type = branch.get("source_type", "")

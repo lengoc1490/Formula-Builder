@@ -600,13 +600,12 @@ class FormulaEngine(FormulaEngineAudit):
             "max_iterable_size": override_kwargs.get("max_iterable_size", d.get("max_iterable_size")),
         }
         engine = cls(formulas=d["formulas"], **init_kwargs)
-
-        if d.get("compiled_serial"):
-            try:
-                for name, serial in d["compiled_serial"].items():
-                    engine._compiled[name] = marshal.loads(serial)
-            except (ValueError, EOFError, TypeError):
-                pass
+        # cls(formulas=...) đã VALIDATE + COMPILE toàn bộ formulas qua
+        # FormulaParser.parse (normalize + SecurityValidator + genexp + whitelist).
+        # Pivot RCE 2026-08-16: KHÔNG overwrite _compiled bằng `compiled_serial`
+        # từ cache dict (bytecode cache có thể bị giả mạo / lệch formula) — giữ
+        # bytecode đã validate từ __init__. compiled_serial giữ trong payload chỉ
+        # để tương thích ngược, không dùng cho eval.
         return engine
 
     # ------------------------------------------------------------------

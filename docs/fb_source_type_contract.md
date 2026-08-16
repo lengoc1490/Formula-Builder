@@ -126,3 +126,18 @@ _handle_my_source.resolve_batch = _resolve_my_source_batch   # gán 1 lần
 3. Test: registration (cả legacy dict + central), schema validate (lỗi required / enum), resolve (single + batch), template, fingerprint (2 binding cùng cfg → 1 group).
 4. Docs: `docs/<source_type>.md` theo mẫu các doc hiện có (composite_key_lookup.md / aggregate_from_items.md), kèm ví dụ ứng dụng thực tế.
 5. Chạy regression: `python -m unittest formula_builder.tests.test_platform_source_types formula_builder.tests.test_config_io formula_builder.tests.test_fb1_revised`.
+
+## 8. Config user-controlled và safe-eval (bắt buộc từ 2026-08-16)
+
+Mọi config trong `source_config` là **user-controlled** (nhập trên UI Formula
+Builder) → KHÔNG bao giờ `eval()` trần chuỗi đó. Phải qua
+`formula_builder.security.safe_eval.compile_expression()`:
+
+| Config | Whitelist hàm | Policy |
+| --- | --- | --- |
+| `filter_expr` (child_table_aggregate) | `get_allowed_funcs()` (settings) | `FILTER_POLICY` (`forbid_subscript=True`) |
+| `branches[].condition` (conditional) | `_CONDITION_ALLOWED_FUNCS` | `CONDITION_POLICY` |
+| `transform.formula` (mọi source type) | `_TRANSFORM_ALLOWED_FUNCS` | `TRANSFORM_POLICY` |
+
+Chi tiết thiết kế + audit eval sites: [`docs/security_safe_eval.md`](security_safe_eval.md).
+
