@@ -1709,3 +1709,1231 @@ def _register_all_to_central_registry():
 
 # Run registration at import time
 _register_all_to_central_registry()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v31 PHASE 3 — PLATFORM EXPANSION SOURCE TYPES (2026-08-16)
+#   matrix_lookup (S2)        — 2D pricing/parameter matrix lookup
+#   reuse_formula_result (S1) — reuse results from another formula/BOM/config
+#
+# Generic for every app. Registered via the unified @register_source from
+# source_type_registry so they carry full metadata (config_schema, fingerprint,
+# batchable) in BOTH the central registry and the legacy handler dict.
+# ═══════════════════════════════════════════════════════════════════════════
+from formula_builder.api.source_type_registry import register_source
+
+# Sentinel: a matched row exists but the value cell is empty → treat as no match
+_MISSING = object()
+
+
+def _fb_row_get(obj, key):
+    """Read a field from a dict / frappe Document / any object with .get()."""
+    if obj is None or not key:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(key)
+    getter = getattr(obj, "get", None)
+    if callable(getter):
+        try:
+            return getter(key)
+        except Exception:
+            pass
+    return getattr(obj, key, None)
+
+
+def _resolve_template_val(val, doc=None, resolved_so_far=None, row=None):
+    """Resolve template strings referencing runtime context.
+
+    Supported syntax (double-brace + FB legacy single-brace):
+      - {{row.field}}   / {row.field}       → value from the current child-table row
+      - {{doc.field}}   / {doc.field}       → value from the parent document
+      - {{resolved.x}}  / {resolved.x}      → value from already-resolved variables
+      - {{inputs.x}}    / {inputs.x}        → alias of resolved
+
+    If the whole string is one template, the raw value is returned (type preserved).
+    If templates are embedded in literal text, they are replaced as strings.
+    Strings without templates are returned unchanged (literals).
+    """
+    import re
+    if not isinstance(val, str):
+        return val
+    resolved_so_far = resolved_so_far or {}
+    if row is None:
+        row = resolved_so_far.get("row")
+
+    def _scope_value(scope, key):
+        if scope == "row":
+            return _fb_row_get(row, key)
+        if scope in ("resolved", "inputs"):
+            return resolved_so_far.get(key)
+        if scope == "doc":
+            return _fb_row_get(doc, key)
+        return None
+
+    full = re.fullmatch(
+        r"\s*\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}\s*", val
+    )
+    if full:
+        return _scope_value(full.group(1), full.group(2))
+    full = re.fullmatch(
+        r"\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\s*", val
+    )
+    if full:
+        return _scope_value(full.group(1), full.group(2))
+
+    out = val
+    for m in re.finditer(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", val):
+        v = _scope_value(m.group(1), m.group(2))
+        out = out.replace(m.group(0), "" if v is None else str(v))
+    for m in re.finditer(r"\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}", val):
+        v = _scope_value(m.group(1), m.group(2))
+        out = out.replace(m.group(0), "" if v is None else str(v))
+    return out
+
+
+def _binding_row(binding, resolved_so_far):
+    """Locate the 'current row' from resolved_so_far or the binding itself."""
+    if isinstance(resolved_so_far, dict) and resolved_so_far.get("row") is not None:
+        return resolved_so_far.get("row")
+    if binding and isinstance(binding, dict):
+        return binding.get("row")
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# matrix_lookup (S2)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _matrix_lookup_value(rows, cfg, row_key, col_key, fb_row_key, fb_col_key, match_mode):
+    """Search fetched matrix rows for a matching cell.
+
+    Returns the raw value of the matched cell, or _MISSING if none matched.
+    Resolution order:
+      1. exact (row_key, col_key)
+      2. fallback row key + exact col key
+      3. exact row key + fallback col key
+      4. fallback row key + fallback col key
+    """
+    row_key_field = cfg.get("row_key_field", "")
+    col_key_field = cfg.get("col_key_field", "")
+    value_field = cfg.get("value_field", "")
+
+    def _eq(a, b):
+        if a is None or b is None:
+            return False
+        if match_mode == "case_insensitive":
+            return str(a).strip().lower() == str(b).strip().lower()
+        return str(a).strip() == str(b).strip()
+
+    def _find(rk, ck):
+        # An axis with a configured field but no resolvable lookup value can never match.
+        if row_key_field and rk is None:
+            return _MISSING
+        if col_key_field and ck is None:
+            return _MISSING
+        for r in rows:
+            rv = _fb_row_get(r, row_key_field) if row_key_field else None
+            cv = _fb_row_get(r, col_key_field) if col_key_field else None
+            row_ok = (not row_key_field) or _eq(rv, rk)
+            col_ok = (not col_key_field) or _eq(cv, ck)
+            if row_ok and col_ok:
+                val = _fb_row_get(r, value_field)
+                if val is not None:
+                    return val
+        return _MISSING
+
+    # Degenerate: matrix has no axes → first row's value
+    if not row_key_field and not col_key_field:
+        if rows:
+            val = _fb_row_get(rows[0], value_field)
+            return val if val is not None else _MISSING
+        return _MISSING
+
+    val = _find(row_key, col_key)
+    if val is not _MISSING:
+        return val
+    if fb_row_key is not None:
+        val = _find(fb_row_key, col_key)
+        if val is not _MISSING:
+            return val
+    if fb_col_key is not None:
+        val = _find(row_key, fb_col_key)
+        if val is not _MISSING:
+            return val
+    if fb_row_key is not None and fb_col_key is not None:
+        val = _find(fb_row_key, fb_col_key)
+        if val is not _MISSING:
+            return val
+    return _MISSING
+
+
+@register_source(
+    "matrix_lookup",
+    label="Matrix Lookup (2D)",
+    description=(
+        "Look up a value from a two-dimensional pricing/parameter matrix by row key and "
+        "column key, with fallback row/col keys and default_value when no cell matches."
+    ),
+    config_schema={
+        "type": "object",
+        "required": ["doctype", "value_field"],
+        "properties": {
+            "doctype": {"type": "string", "description": "DocType storing the matrix rows"},
+            "row_key_field": {"type": "string", "description": "Field used as the row key (e.g. size)"},
+            "col_key_field": {"type": "string", "description": "Field used as the column key (e.g. thickness)"},
+            "value_field": {"type": "string", "description": "Field holding the value to return"},
+            "row_key": {"type": "string", "description": "Value to match on the row axis. Supports {{row.field}}, {{doc.field}}, {{resolved.field}} templates."},
+            "col_key": {"type": "string", "description": "Value to match on the column axis. Supports templates."},
+            "fallback_row_key": {"type": "string", "description": "Row key to fall back to when no exact match (e.g. 'ANY'). Supports templates."},
+            "fallback_col_key": {"type": "string", "description": "Column key to fall back to when no exact match (e.g. 'ANY'). Supports templates."},
+            "match_mode": {"type": "string", "enum": ["exact", "case_insensitive"], "description": "Key comparison mode"},
+            "filters": {"type": "array", "description": "Extra Frappe filters scoping the matrix query (e.g. by currency, region, date)."},
+        },
+    },
+    batchable=True,
+    fingerprint_fn=lambda cfg: "matrix_lookup:" + "|".join([
+        cfg.get("doctype", ""),
+        cfg.get("row_key_field", ""),
+        cfg.get("col_key_field", ""),
+        cfg.get("value_field", ""),
+        cfg.get("match_mode", "exact"),
+        hashlib.md5(json.dumps(cfg.get("filters") or [], sort_keys=True).encode()).hexdigest()[:12],
+    ]),
+    supports_transform=True,
+    supports_cache=True,
+    default_cache_ttl=300,
+)
+def _handle_matrix_lookup(binding, doc, resolved_so_far):
+    cfg = json.loads(binding.get("source_config") or "{}")
+    doctype = cfg.get("doctype", "")
+    value_field = cfg.get("value_field", "")
+    default_value = cfg.get("default_value", binding.get("default_value"))
+    data_type = binding.get("data_type") or cfg.get("type", "Float")
+
+    if not doctype or not value_field:
+        return default_value
+
+    row = _binding_row(binding, resolved_so_far)
+    row_key = _resolve_template_val(cfg.get("row_key"), doc, resolved_so_far, row)
+    col_key = _resolve_template_val(cfg.get("col_key"), doc, resolved_so_far, row)
+    fb_row_key = _resolve_template_val(cfg.get("fallback_row_key"), doc, resolved_so_far, row) if cfg.get("fallback_row_key") is not None else None
+    fb_col_key = _resolve_template_val(cfg.get("fallback_col_key"), doc, resolved_so_far, row) if cfg.get("fallback_col_key") is not None else None
+    match_mode = cfg.get("match_mode", "exact")
+
+    try:
+        fields = list(dict.fromkeys(
+            f for f in (cfg.get("row_key_field", ""), cfg.get("col_key_field", ""), value_field) if f
+        ))
+        rows = frappe.get_all(
+            doctype,
+            filters=cfg.get("filters") or None,
+            fields=fields,
+            limit_page_length=0,
+        ) or []
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"DataSource: matrix_lookup ({binding.get('variable_name')})",
+        )
+        return default_value
+
+    val = _matrix_lookup_value(rows, cfg, row_key, col_key, fb_row_key, fb_col_key, match_mode)
+    if val is _MISSING:
+        return default_value
+    return _cast(val, data_type)
+
+
+def _resolve_matrix_lookup_batch(bindings, doc, resolved_so_far):
+    """Batch: fetch the matrix rows ONCE per group, reuse across bindings."""
+    results = {}
+    if not bindings:
+        return results
+    cfg0 = json.loads(bindings[0].get("source_config") or "{}")
+    doctype = cfg0.get("doctype", "")
+    value_field = cfg0.get("value_field", "")
+    match_mode = cfg0.get("match_mode", "exact")
+    fields = list(dict.fromkeys(
+        f for f in (cfg0.get("row_key_field", ""), cfg0.get("col_key_field", ""), value_field) if f
+    ))
+    rows = []
+    if doctype and value_field:
+        try:
+            rows = frappe.get_all(
+                doctype,
+                filters=cfg0.get("filters") or None,
+                fields=fields,
+                limit_page_length=0,
+            ) or []
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                "DataSource: matrix_lookup (batch)",
+            )
+            rows = []
+
+    for b in bindings:
+        cfg = json.loads(b.get("source_config") or "{}")
+        default_value = cfg.get("default_value", b.get("default_value"))
+        data_type = b.get("data_type") or cfg.get("type", "Float")
+        if not doctype or not value_field or not rows:
+            results[b["variable_name"]] = default_value
+            continue
+        row = _binding_row(b, resolved_so_far)
+        row_key = _resolve_template_val(cfg.get("row_key"), doc, resolved_so_far, row)
+        col_key = _resolve_template_val(cfg.get("col_key"), doc, resolved_so_far, row)
+        fb_row_key = _resolve_template_val(cfg.get("fallback_row_key"), doc, resolved_so_far, row) if cfg.get("fallback_row_key") is not None else None
+        fb_col_key = _resolve_template_val(cfg.get("fallback_col_key"), doc, resolved_so_far, row) if cfg.get("fallback_col_key") is not None else None
+        val = _matrix_lookup_value(rows, cfg, row_key, col_key, fb_row_key, fb_col_key, match_mode)
+        results[b["variable_name"]] = default_value if val is _MISSING else _cast(val, data_type)
+    return results
+
+
+_handle_matrix_lookup.resolve_batch = _resolve_matrix_lookup_batch
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# reuse_formula_result (S1)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _detect_line_field(target_doc):
+    """Auto-detect the first Table child-table field on the target document."""
+    if target_doc is None:
+        return None
+    try:
+        for f in target_doc.meta.fields:
+            if f.fieldtype in ("Table", "Table MultiSelect"):
+                return f.fieldname
+    except Exception:
+        pass
+    for name in ("lines", "items", "rows", "cost_lines", "details"):
+        if target_doc.get(name) is not None:
+            return name
+    return None
+
+
+def _infer_line_match_field(line_match):
+    """Infer the target-line field from a line_match template/bare field name.
+
+    '{{row.item_code}}'  → 'item_code'
+    '{row.item_code}'    → 'item_code'
+    'item_code'          → 'item_code'
+    '{{doc.quotation}}'  → None (no inferable target-line field → use line_match_field)
+    """
+    import re
+    if not line_match or not isinstance(line_match, str):
+        return None
+    s = line_match.strip()
+    m = re.fullmatch(r"\{\{\s*row\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", s)
+    if m:
+        return m.group(1)
+    m = re.fullmatch(r"\{\s*row\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}", s)
+    if m:
+        return m.group(1)
+    if all(ch.isalnum() or ch == "_" for ch in s) and not s[0].isdigit():
+        return s
+    return None
+
+
+def _resolve_reuse_target_name(cfg, doc, resolved_so_far):
+    """Locate the formula/BOM/config document instance to reuse results from."""
+    formula_document = cfg.get("formula_document", "")
+    if cfg.get("document_name"):
+        return _resolve_template_val(cfg.get("document_name"), doc, resolved_so_far)
+
+    scope_field = cfg.get("scope_field", "")
+    scope_value = cfg.get("scope_value")
+    if not formula_document or not scope_field or scope_value is None:
+        return None
+    sv = _resolve_template_val(scope_value, doc, resolved_so_far)
+    if sv is None or sv == "":
+        return None
+    extra = []
+    for f in cfg.get("filters") or []:
+        if isinstance(f, list) and len(f) == 3:
+            extra.append([f[0], f[1], _resolve_template_val(f[2], doc, resolved_so_far)])
+    filters = [[scope_field, "=", sv]] + extra
+    order_by = cfg.get("scope_order_by", "modified desc")
+    try:
+        names = frappe.get_all(
+            formula_document,
+            filters=filters,
+            fields=["name"],
+            limit=1,
+            order_by=order_by,
+        )
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"DataSource: reuse_formula_result (locate {formula_document})",
+        )
+        return None
+    return names[0].get("name") if names else None
+
+
+def _aggregate_reuse_lines(target_doc, cfg, doc, resolved_so_far, row, default_value, data_type):
+    """Select matching lines from the target document and aggregate result_field."""
+    line_field = cfg.get("line_field") or _detect_line_field(target_doc)
+    lines = []
+    if line_field:
+        lines = target_doc.get(line_field) or []
+    if not lines:
+        return default_value
+
+    # Match current row against target lines
+    matched = list(lines)
+    if cfg.get("line_match"):
+        lm_raw = cfg.get("line_match")
+        lm_field = cfg.get("line_match_field") or _infer_line_match_field(lm_raw)
+        # Bare field name (e.g. "item_code") → resolve the value from the current row
+        if lm_field and isinstance(lm_raw, str) and lm_raw.strip() == lm_field:
+            match_val = _fb_row_get(row, lm_field) if row is not None else None
+        else:
+            match_val = _resolve_template_val(lm_raw, doc, resolved_so_far, row)
+        if match_val is not None and lm_field:
+            matched = [
+                ln for ln in lines
+                if _fb_row_get(ln, lm_field) is not None
+                and str(_fb_row_get(ln, lm_field)).strip() == str(match_val).strip()
+            ]
+
+    if not matched:
+        return default_value
+
+    aggregation = cfg.get("aggregation", "sum")
+    values = [_fb_row_get(ln, cfg.get("result_field", "")) for ln in matched]
+
+    if aggregation in ("first", "last"):
+        idx = 0 if aggregation == "first" else len(values) - 1
+        return _cast(values[idx], data_type)
+
+    nums = []
+    for v in values:
+        if v is None:
+            continue
+        try:
+            nums.append(float(v))
+        except (TypeError, ValueError):
+            continue
+    if not nums:
+        return default_value
+    if aggregation == "sum":
+        result = sum(nums)
+    elif aggregation == "avg":
+        result = sum(nums) / len(nums)
+    elif aggregation == "min":
+        result = min(nums)
+    elif aggregation == "max":
+        result = max(nums)
+    else:
+        return default_value
+    return _cast(result, data_type)
+
+
+@register_source(
+    "reuse_formula_result",
+    label="Reuse Formula Result",
+    description=(
+        "Reuse results from another formula/BOM/config document (e.g. cost template lines). "
+        "Locates the target document by scope_field/scope_value, matches its child lines to the "
+        "current row, and aggregates result_field (sum/min/max/avg/first/last)."
+    ),
+    config_schema={
+        "type": "object",
+        "required": ["formula_document", "result_field"],
+        "properties": {
+            "formula_document": {"type": "string", "description": "DocType of the formula/BOM/cost-template document whose results are reused"},
+            "scope_field": {"type": "string", "description": "Field on the target document used to locate the right instance (e.g. 'quotation')"},
+            "scope_value": {"type": "string", "description": "Value for scope_field; supports {{row.field}}, {{doc.field}}, {{resolved.field}} templates."},
+            "document_name": {"type": "string", "description": "Alternative to scope_field/scope_value: exact document name (template supported)."},
+            "line_field": {"type": "string", "description": "Child-table fieldname holding the result lines (auto-detected from the first Table field if blank)."},
+            "line_match": {"type": "string", "description": "Template/field matching the current row against target lines, e.g. '{{row.item_code}}'."},
+            "line_match_field": {"type": "string", "description": "Field on target lines compared to line_match (defaults to line_match when it is a bare field name or a {{row.X}} template)."},
+            "result_field": {"type": "string", "description": "Field on matched lines to aggregate/read."},
+            "aggregation": {"type": "string", "enum": ["sum", "min", "max", "avg", "first", "last"], "description": "How to combine matched lines."},
+            "scope_order_by": {"type": "string", "description": "Order used to pick the target document when scope_field matches several (default 'modified desc')."},
+            "filters": {"type": "array", "description": "Extra Frappe filters scoping the target-document lookup."},
+        },
+    },
+    batchable=True,
+    fingerprint_fn=lambda cfg: "reuse_formula_result:" + "|".join([
+        cfg.get("formula_document", ""),
+        cfg.get("scope_field", ""),
+        cfg.get("line_field", ""),
+        cfg.get("line_match_field", ""),
+        cfg.get("result_field", ""),
+        cfg.get("aggregation", "sum"),
+        hashlib.md5(
+            json.dumps(
+                [cfg.get("scope_value"), cfg.get("line_match"), cfg.get("document_name"), cfg.get("filters") or []],
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()[:12],
+    ]),
+    supports_transform=True,
+    supports_cache=True,
+    default_cache_ttl=300,
+)
+def _handle_reuse_formula_result(binding, doc, resolved_so_far):
+    cfg = json.loads(binding.get("source_config") or "{}")
+    formula_document = cfg.get("formula_document", "")
+    result_field = cfg.get("result_field", "")
+    default_value = cfg.get("default_value", binding.get("default_value"))
+    data_type = binding.get("data_type") or cfg.get("type", "Float")
+
+    if not formula_document or not result_field:
+        return default_value
+
+    name = _resolve_reuse_target_name(cfg, doc, resolved_so_far)
+    if not name:
+        return default_value
+
+    try:
+        target_doc = frappe.get_doc(formula_document, name)
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"DataSource: reuse_formula_result (get_doc {formula_document}/{name})",
+        )
+        return default_value
+
+    row = _binding_row(binding, resolved_so_far)
+    return _aggregate_reuse_lines(
+        target_doc, cfg, doc, resolved_so_far, row, default_value, data_type
+    )
+
+
+def _resolve_reuse_formula_result_batch(bindings, doc, resolved_so_far):
+    """Batch: fetch each referenced target document once and reuse across bindings."""
+    results = {}
+    if not bindings:
+        return results
+    doc_cache = {}
+    for b in bindings:
+        cfg = json.loads(b.get("source_config") or "{}")
+        formula_document = cfg.get("formula_document", "")
+        result_field = cfg.get("result_field", "")
+        default_value = cfg.get("default_value", b.get("default_value"))
+        data_type = b.get("data_type") or cfg.get("type", "Float")
+        if not formula_document or not result_field:
+            results[b["variable_name"]] = default_value
+            continue
+        name = _resolve_reuse_target_name(cfg, doc, resolved_so_far)
+        if not name:
+            results[b["variable_name"]] = default_value
+            continue
+        if name not in doc_cache:
+            try:
+                doc_cache[name] = frappe.get_doc(formula_document, name)
+            except Exception:
+                frappe.log_error(
+                    frappe.get_traceback(),
+                    f"DataSource: reuse_formula_result (batch get_doc {formula_document}/{name})",
+                )
+                doc_cache[name] = None
+        target_doc = doc_cache[name]
+        if target_doc is None:
+            results[b["variable_name"]] = default_value
+            continue
+        row = _binding_row(b, resolved_so_far)
+        results[b["variable_name"]] = _aggregate_reuse_lines(
+            target_doc, cfg, doc, resolved_so_far, row, default_value, data_type
+        )
+    return results
+
+
+_handle_reuse_formula_result.resolve_batch = _resolve_reuse_formula_result_batch
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FB-1 REVISED — MATRIX N-CHIỀU + AGGREGATE_FROM_ITEMS (2026-08-16)
+#   composite_key_lookup   — matrix N-chiều (key_fields động + fallback_keys +
+#                            match_mode exact/case_insensitive/multiplier_chain)
+#   aggregate_from_items   — sum field theo key_field/key_value (giống sumif),
+#                            rows_source = snapshot | child_table | doctype_query
+#                            (thay py thuần dict fb_handlers.cost_bucket_aggregate)
+#
+# Backward-compat: matrix_lookup 2 trục = special case — giữ nguyên, không sửa.
+# Mọi thứ THÊM ở cuối file. Không đụng dòng 584/1075.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# composite_key_lookup — matrix N-chiều
+# ───────────────────────────────────────────────────────────────────────────
+
+def _resolve_key_values(cfg, doc, resolved_so_far, row):
+    """Resolve danh sách (key_field, key_value) từ config.
+
+    key_fields: list N tên field làm chiều.
+    key_values: list N giá trị — hỗ trợ template {{row.x}}/{{doc.x}}/{{resolved.x}}.
+      Nếu bỏ trống → auto-map '{{row.<key_field>}}' cho từng chiều.
+    Trả về list tuple (field, value). Bỏ qua chiều có value None/''.
+    """
+    key_fields = cfg.get("key_fields") or []
+    key_values = cfg.get("key_values") or []
+    out = []
+    for i, kf in enumerate(key_fields):
+        if i < len(key_values) and key_values[i] is not None and str(key_values[i]).strip():
+            raw = key_values[i]
+        else:
+            raw = "{{row." + kf + "}}"
+        val = _resolve_template_val(raw, doc, resolved_so_far, row)
+        if val is None or val == "":
+            continue
+        out.append((kf, val))
+    return out
+
+
+def _composite_match_value(rows, cfg, dims, match_mode):
+    """Tìm row khớp N chiều trong danh sách rows.
+
+    Trả về (row, set_of_matched_key_fields) hoặc (None, None).
+    match_mode exact | case_insensitive ảnh hưởng cách so sánh.
+    """
+    row_key_fields = [d[0] for d in dims]
+
+    def _eq(a, b):
+        if a is None or b is None:
+            return False
+        if match_mode == "case_insensitive":
+            return str(a).strip().lower() == str(b).strip().lower()
+        return str(a).strip() == str(b).strip()
+
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        ok = True
+        for kf, kv in dims:
+            if not _eq(_fb_row_get(r, kf), kv):
+                ok = False
+                break
+        if ok:
+            return r, set(row_key_fields)
+    return None, None
+
+
+def _apply_multiplier_chain(cfg, doc, resolved_so_far, row, base_value, matched_dims):
+    """multiplier_chain: base_value × ∏(multiplier của từng chiều KHÔNG khớp).
+
+    matched_dims: set key_field đã khớp ở row fallback. Các chiều còn lại
+    (trong key_fields nhưng không khớp) → tra multipliers[dim] và nhân.
+    """
+    value = base_value
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return base_value
+    key_fields = cfg.get("key_fields") or []
+    multipliers = cfg.get("multipliers") or {}
+    for kf in key_fields:
+        if kf in matched_dims:
+            continue
+        mcfg = multipliers.get(kf)
+        if not mcfg:
+            continue
+        m_doctype = mcfg.get("doctype") or cfg.get("doctype")
+        m_match_field = mcfg.get("match_field", kf)
+        m_match_value = mcfg.get("match_value")
+        m_value_field = mcfg.get("value_field", "multiplier")
+        if m_match_value is None:
+            m_match_value = "{{row." + kf + "}}"
+        mv = _resolve_template_val(m_match_value, doc, resolved_so_far, row)
+        if mv is None:
+            continue
+        try:
+            rows_m = frappe.get_all(
+                m_doctype,
+                filters=[[m_match_field, "=", mv]],
+                fields=[m_value_field],
+                limit=1,
+                limit_page_length=1,
+            )
+            if not rows_m:
+                continue
+            mult = rows_m[0].get(m_value_field)
+            value = value * float(mult)
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"DataSource: composite_key_lookup multiplier ({m_doctype}/{m_match_field})",
+            )
+    return value
+
+
+def _fetch_composite_rows(cfg):
+    """Fetch toàn bộ rows của ma trận 1 lần (doctype + filters).
+
+    Fields: key_fields + value_field (+ các field multiplier nếu có).
+    """
+    doctype = cfg.get("doctype", "")
+    if not doctype:
+        return []
+    value_field = cfg.get("value_field", "")
+    fields = list(cfg.get("key_fields") or [])
+    if value_field and value_field not in fields:
+        fields.append(value_field)
+    for mcfg in (cfg.get("multipliers") or {}).values():
+        vf = mcfg.get("value_field")
+        if vf and vf not in fields:
+            fields.append(vf)
+    try:
+        return frappe.get_all(
+            doctype,
+            filters=cfg.get("filters") or None,
+            fields=fields or ["name"],
+            limit_page_length=0,
+        ) or []
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"DataSource: composite_key_lookup fetch ({doctype})",
+        )
+        return []
+
+
+def _resolve_composite_value(rows, cfg, dims, doc, resolved_so_far, row,
+                             default_value, data_type):
+    """Resolve 1 binding composite trên tập rows đã fetch.
+
+    Resolution order:
+      1. exact (toàn bộ dims) → value
+      2. fallback_keys: lần lượt thử từng subset (rút bớt chiều)
+      3. multiplier_chain: nếu khớp fallback mà còn chiều bỏ → nhân multiplier
+      4. default_value
+    """
+    value_field = cfg.get("value_field", "")
+    match_mode = cfg.get("match_mode", "exact")
+
+    # 1. Exact full dims
+    matched_row, matched_dims = _composite_match_value(rows, cfg, dims, match_mode)
+    if matched_row is not None:
+        return _cast(matched_row.get(value_field), data_type)
+
+    # 2. Fallback subsets (rút dần chiều)
+    fallback_keys = cfg.get("fallback_keys") or []
+    for subset in fallback_keys:
+        subset_dims = [d for d in dims if d[0] in subset]
+        if not subset_dims:
+            continue
+        candidates = _composite_fallback_candidates(
+            rows, cfg, dims, subset_dims, match_mode
+        )
+        mrow, mset = _composite_match_value(candidates, cfg, subset_dims, match_mode)
+        if mrow is not None:
+            base = mrow.get(value_field)
+            if match_mode == "multiplier_chain":
+                base = _apply_multiplier_chain(
+                    cfg, doc, resolved_so_far, row, base, mset
+                )
+            return _cast(base, data_type)
+
+    return default_value
+
+
+def _composite_fallback_candidates(rows, cfg, dims, subset_dims, match_mode):
+    """Lọc rows cho fallback subset: chỉ giữ row mà các chiều KHÔNG nằm
+    trong subset có giá trị ANY/None/'' hoặc bằng giá trị requested.
+
+    Mục đích: khi rút bớt chiều (vd chỉ khớp item_code+color), row ứng viên
+    phải là row tổng quát (chiều bỏ = ANY) hoặc không mâu thuẫn với giá trị
+    requested — KHÔNG lấy row cụ thể có giá trị khác (vd thickness=1.2 khi
+    đang cần 9.9). Đây là ngữ nghĩa đúng của bảng giá fallback.
+    """
+    subset_fields = {d[0] for d in subset_dims}
+    requested = {d[0]: d[1] for d in dims if d[0] not in subset_fields}
+
+    def _eq(a, b):
+        if a is None or b is None:
+            return False
+        if match_mode == "case_insensitive":
+            return str(a).strip().lower() == str(b).strip().lower()
+        return str(a).strip() == str(b).strip()
+
+    def _is_wild(v):
+        if v is None:
+            return True
+        return str(v).strip() == "" or str(v).strip().lower() == "any"
+
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        ok = True
+        for kf, kv in requested.items():
+            rv = _fb_row_get(r, kf)
+            if not (_is_wild(rv) or _eq(rv, kv)):
+                ok = False
+                break
+        if ok:
+            out.append(r)
+    return out
+
+
+@register_source(
+    "composite_key_lookup",
+    label="Composite Key Lookup (N-Dimension Matrix)",
+    description=(
+        "Look up a value from an N-dimensional pricing/parameter matrix by a dynamic "
+        "set of key fields (item_code, color, thickness, surface, ...). Supports "
+        "fallback_keys (progressively drop dimensions), match_mode exact / "
+        "case_insensitive / multiplier_chain (base value × multipliers for dropped "
+        "dimensions), and default_value. matrix_lookup (2D) is a special case."
+    ),
+    config_schema={
+        "type": "object",
+        "required": ["doctype", "value_field"],
+        "properties": {
+            "doctype": {"type": "string", "description": "DocType storing the matrix rows"},
+            "value_field": {"type": "string", "description": "Field holding the value to return"},
+            "key_fields": {"type": "array", "items": {"type": "string"}, "description": "N key field names (dimensions), e.g. ['item_code','color','thickness','surface']"},
+            "key_values": {"type": "array", "items": {"type": "string"}, "description": "N key values aligned with key_fields; supports {{row.field}}, {{doc.field}}, {{resolved.field}} templates. Auto-mapped from {{row.<key_field>}} if blank."},
+            "fallback_keys": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "Ordered list of key-field subsets to try when no exact match (progressively drop dimensions), e.g. [['item_code','color'], ['item_code']]."},
+            "match_mode": {"type": "string", "enum": ["exact", "case_insensitive", "multiplier_chain"], "description": "Key comparison mode. multiplier_chain applies per-dimension multipliers for dropped dimensions."},
+            "multipliers": {"type": "object", "description": "For multiplier_chain: map dim → {doctype, match_field, match_value, value_field} to look up the multiplier for a dropped dimension."},
+            "filters": {"type": "array", "description": "Extra Frappe filters scoping the matrix query."},
+            "default_value": {"type": ["number", "string"], "description": "Value returned when no matrix row matches (default 0)."},
+        },
+    },
+    batchable=True,
+    fingerprint_fn=lambda cfg: "composite_key_lookup:" + "|".join([
+        cfg.get("doctype", ""),
+        cfg.get("value_field", ""),
+        json.dumps(cfg.get("key_fields") or [], sort_keys=True),
+        cfg.get("match_mode", "exact"),
+        hashlib.md5(
+            json.dumps([cfg.get("filters") or [], cfg.get("fallback_keys") or []], sort_keys=True).encode()
+        ).hexdigest()[:12],
+    ]),
+    supports_transform=True,
+    supports_cache=True,
+    default_cache_ttl=300,
+)
+def _handle_composite_key_lookup(binding, doc, resolved_so_far):
+    cfg = json.loads(binding.get("source_config") or "{}")
+    doctype = cfg.get("doctype", "")
+    value_field = cfg.get("value_field", "")
+    default_value = cfg.get("default_value", binding.get("default_value"))
+    data_type = binding.get("data_type") or cfg.get("type", "Float")
+
+    if not doctype or not value_field:
+        return default_value
+
+    row = _binding_row(binding, resolved_so_far)
+    dims = _resolve_key_values(cfg, doc, resolved_so_far, row)
+    if not dims:
+        return default_value
+
+    rows = _fetch_composite_rows(cfg)
+    if not rows:
+        return default_value
+
+    return _resolve_composite_value(
+        rows, cfg, dims, doc, resolved_so_far, row, default_value, data_type
+    )
+
+
+def _resolve_composite_key_lookup_batch(bindings, doc, resolved_so_far):
+    """Batch: fetch rows ma trận 1 lần/group, resolve từng binding."""
+    results = {}
+    if not bindings:
+        return results
+    cfg0 = json.loads(bindings[0].get("source_config") or "{}")
+    rows = _fetch_composite_rows(cfg0)
+    for b in bindings:
+        cfg = json.loads(b.get("source_config") or "{}")
+        default_value = cfg.get("default_value", b.get("default_value"))
+        data_type = b.get("data_type") or cfg.get("type", "Float")
+        value_field = cfg.get("value_field", "")
+        if not rows or not value_field:
+            results[b["variable_name"]] = default_value
+            continue
+        row = _binding_row(b, resolved_so_far)
+        dims = _resolve_key_values(cfg, doc, resolved_so_far, row)
+        if not dims:
+            results[b["variable_name"]] = default_value
+            continue
+        results[b["variable_name"]] = _resolve_composite_value(
+            rows, cfg, dims, doc, resolved_so_far, row, default_value, data_type
+        )
+    return results
+
+
+_handle_composite_key_lookup.resolve_batch = _resolve_composite_key_lookup_batch
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# aggregate_from_items — sum field theo key_field/key_value (giống sumif)
+#   Thay py thuần dict fb_handlers.cost_bucket_aggregate cho AL Cost Bucket.
+#   rows_source = snapshot | child_table | doctype_query.
+# ───────────────────────────────────────────────────────────────────────────
+
+def _resolve_aggregate_rows(cfg, doc, resolved_so_far):
+    """Lấy rows nguồn theo rows_source.
+
+    Returns:
+        list rows (mỗi row là dict), hoặc None nếu không lấy được.
+    """
+    rows_source = cfg.get("rows_source", "snapshot")
+
+    if rows_source == "child_table":
+        child_field = cfg.get("child_table_field", "")
+        if not doc or not child_field:
+            return None
+        rows = doc.get(child_field) or []
+        if not isinstance(rows, (list, tuple)):
+            rows = list(rows)
+        return [r for r in rows if r is not None]
+
+    if rows_source == "doctype_query":
+        doctype = cfg.get("doctype", "")
+        if not doctype:
+            return None
+        fields = cfg.get("fields") or ["name"]
+        filters_raw = cfg.get("filters") or []
+        order_by = cfg.get("order_by") or ""
+        limit = cfg.get("limit") or 0
+
+        def _resolve_filter_val(v):
+            if isinstance(v, str) and v.startswith("{doc.") and v.endswith("}"):
+                return doc.get(v[5:-1]) if doc else None
+            if isinstance(v, str) and v.startswith("{resolved.") and v.endswith("}"):
+                return resolved_so_far.get(v[10:-1]) if isinstance(resolved_so_far, dict) else None
+            return v
+
+        filters = []
+        for f in filters_raw:
+            if isinstance(f, list) and len(f) == 3:
+                filters.append([f[0], f[1], _resolve_filter_val(f[2])])
+        try:
+            return frappe.get_all(
+                doctype,
+                filters=filters or None,
+                fields=fields,
+                order_by=order_by or None,
+                limit_page_length=limit if limit else 0,
+            ) or []
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"DataSource: aggregate_from_items (doctype_query {doctype})",
+            )
+            return None
+
+    # snapshot (default): load doc snapshot_doctype → đọc field snapshot_field
+    # (JSON string) → lấy rows tại rows_path.
+    snapshot_doctype = cfg.get("snapshot_doctype", "")
+    snapshot_name = cfg.get("snapshot_name") or ""
+    snapshot_field = cfg.get("snapshot_field", "snapshot")
+    rows_path = cfg.get("rows_path", "items")
+
+    if not snapshot_doctype:
+        return None
+
+    # snapshot_name có thể là template {{doc.field}} / {{resolved.field}}
+    snap_name = _resolve_template_val(snapshot_name, doc, resolved_so_far) if snapshot_name else None
+    if not snap_name:
+        # Fallback: lấy từ resolved_so_far / doc field
+        snap_name = (resolved_so_far or {}).get(snapshot_doctype) or doc.get(snapshot_doctype) if doc else None
+    if not snap_name:
+        return None
+
+    try:
+        snap_doc = frappe.get_doc(snapshot_doctype, snap_name)
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"DataSource: aggregate_from_items (snapshot get_doc {snapshot_doctype}/{snap_name})",
+        )
+        return None
+
+    raw = snap_doc.get(snapshot_field) if snap_doc else None
+    if raw is None:
+        return None
+    # snapshot_field có thể là JSON string hoặc dict (từ frappe)
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    elif isinstance(raw, dict):
+        data = raw
+    else:
+        return None
+    rows = data.get(rows_path) if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return None
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def _match_filter_value(row_val, op, target):
+    """So sánh row_val với target theo op (Frappe-style filter operator).
+
+    Hỗ trợ =, ==, !=, <>, >, <, >=, <=, like, in, not in.
+    """
+    if row_val is None:
+        return False
+    op = (op or "=").strip().lower()
+    if op in ("=", "=="):
+        return str(row_val).strip() == str(target).strip()
+    if op in ("!=", "<>"):
+        return str(row_val).strip() != str(target).strip()
+    if op == "like":
+        return str(target).lower() in str(row_val).lower()
+    if op == "in":
+        tlist = target if isinstance(target, (list, tuple)) else [target]
+        return str(row_val).strip() in {str(t).strip() for t in tlist}
+    if op == "not in":
+        tlist = target if isinstance(target, (list, tuple)) else [target]
+        return str(row_val).strip() not in {str(t).strip() for t in tlist}
+    try:
+        rv, tv = float(row_val), float(target)
+    except (TypeError, ValueError):
+        return False
+    return {"<": rv < tv, "<=": rv <= tv, ">": rv > tv, ">=": rv >= tv}.get(op, False)
+
+
+def _apply_aggregate_filters(rows, cfg, doc, resolved_so_far, row):
+    """Áp dụng multi-field filters (Frappe-style list) lên rows dict.
+
+    Mỗi filter: ["field", "op", "value"] với op ∈ =, !=, >, <, >=, <=, like, in, not in.
+    Value hỗ trợ template {{row.field}}, {{doc.field}}, {{resolved.field}}.
+    Dùng cho MỌI rows_source (snapshot, child_table, doctype_query) — thay được
+    filter_by cũ của fb_handlers.cost_bucket_aggregate. Kết hợp AND với
+    key_field/key_value.
+    """
+    filters = cfg.get("filters") or []
+    if not filters:
+        return rows
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        ok = True
+        for f in filters:
+            if not (isinstance(f, (list, tuple)) and len(f) == 3):
+                continue
+            field, op, val = f[0], f[1], f[2]
+            if isinstance(val, str):
+                val = _resolve_template_val(val, doc, resolved_so_far, row)
+            if not _match_filter_value(_fb_row_get(r, field), op, val):
+                ok = False
+                break
+        if ok:
+            out.append(r)
+    return out
+
+
+@register_source(
+    "aggregate_from_items",
+    label="Aggregate From Items (sumif-style)",
+    description=(
+        "Sum/aggregate a field from a set of rows (snapshot JSON, current child table, "
+        "or a doctype query) filtered by key_field == key_value — like SUMIF. "
+        "Optional multi-field `filters` (Frappe-style list) apply to every rows_source "
+        "and combine AND with key_field/key_value. Replaces the pure-Python dict helper "
+        "fb_handlers.cost_bucket_aggregate for AL Cost Bucket. When key_value is empty, "
+        "aggregates over all rows (AGGREGATE node)."
+    ),
+    config_schema={
+        "type": "object",
+        "required": ["rows_source", "aggregate", "value_field"],
+        "required_unless": {
+            "value_field": {"if": "aggregate", "equals": "count"},
+        },
+        "properties": {
+            "rows_source": {"type": "string", "enum": ["snapshot", "child_table", "doctype_query"], "description": "Where to read the source rows from."},
+            "snapshot_doctype": {"type": "string", "description": "DocType holding the snapshot (rows_source=snapshot)."},
+            "snapshot_name": {"type": "string", "description": "Name of the snapshot doc; supports {{doc.field}}, {{resolved.field}} templates. Falls back to resolved_so_far[snapshot_doctype] or doc[snapshot_doctype]."},
+            "snapshot_field": {"type": "string", "description": "Field on the snapshot doc holding the JSON data (default 'snapshot')."},
+            "rows_path": {"type": "string", "description": "JSON path inside snapshot data where the rows list lives (default 'items')."},
+            "child_table_field": {"type": "string", "description": "Child-table fieldname on the current doc (rows_source=child_table)."},
+            "doctype": {"type": "string", "description": "Target DocType to query (rows_source=doctype_query)."},
+            "fields": {"type": "array", "items": {"type": "string"}, "description": "Fields to fetch for doctype_query (default ['name'])."},
+            "filters": {"type": "array", "description": "Multi-field Frappe-style filters applied to EVERY rows_source: [['field','=','val'], ...]. Operators: =, !=, >, <, >=, <=, like, in, not in. Values support {{row.field}}, {{doc.field}}, {{resolved.field}} templates. For doctype_query these are also passed to get_all. Combines AND with key_field/key_value."},
+            "order_by": {"type": "string", "description": "Order clause for doctype_query."},
+            "limit": {"type": "integer", "description": "Max rows for doctype_query (0 = unlimited)."},
+            "key_field": {"type": "string", "description": "Field used as the filter key (like SUMIF criteria field), e.g. 'cost_bucket'."},
+            "key_value": {"type": "string", "description": "Value to match on key_field; supports {{row.field}}, {{doc.field}}, {{resolved.field}} templates. Empty → aggregate over all rows."},
+            "value_field": {"type": "string", "description": "Field to aggregate, e.g. 'line_total'. Required except when aggregate=count. Preferred over sum_field when both present."},
+            "sum_field": {"type": "string", "description": "ALIAS của value_field (backward-compat với AL Cost Bucket source_config cũ dùng sum_field). Chỉ đọc khi value_field rỗng. KHÔNG thay đổi schema chuẩn — value_field vẫn required (trừ count)."},
+            "aggregate": {"type": "string", "enum": ["sum", "avg", "min", "max", "count", "first", "last"], "description": "Aggregation function."},
+            "default_value": {"type": ["number", "string"], "description": "Value returned when no rows match or the rows source fails (default 0)."},
+        },
+    },
+    batchable=True,
+    fingerprint_fn=lambda cfg: "aggregate_from_items:" + "|".join([
+        cfg.get("rows_source", "snapshot"),
+        cfg.get("snapshot_doctype", ""),
+        cfg.get("snapshot_field", "snapshot"),
+        cfg.get("rows_path", "items"),
+        cfg.get("child_table_field", ""),
+        cfg.get("doctype", ""),
+        json.dumps(cfg.get("filters") or [], sort_keys=True),
+        cfg.get("key_field", ""),
+        cfg.get("value_field") or cfg.get("sum_field", ""),
+        cfg.get("aggregate", "sum"),
+    ]),
+    supports_transform=True,
+    supports_cache=True,
+    default_cache_ttl=300,
+)
+def _handle_aggregate_from_items(binding, doc, resolved_so_far):
+    cfg = json.loads(binding.get("source_config") or "{}")
+    default_value = cfg.get("default_value", binding.get("default_value"))
+    data_type = binding.get("data_type") or cfg.get("type", "Float")
+    key_field = cfg.get("key_field", "")
+    key_value = cfg.get("key_value", "")
+    value_field = cfg.get("value_field") or cfg.get("sum_field", "")
+    aggregate = cfg.get("aggregate", "sum")
+
+    rows = _resolve_aggregate_rows(cfg, doc, resolved_so_far)
+    if rows is None:
+        return default_value
+
+    # Multi-field filters (Frappe-style) — snapshot/child_table lọc in-memory;
+    # doctype_query đã lọc ở get_all (filter value dùng {doc.x}/{resolved.x}).
+    if cfg.get("rows_source") != "doctype_query":
+        row = _binding_row(binding, resolved_so_far)
+        rows = _apply_aggregate_filters(rows, cfg, doc, resolved_so_far, row)
+    else:
+        row = _binding_row(binding, resolved_so_far)
+
+    # Lọc theo key_field == key_value (key_value rỗng → giữ toàn bộ)
+    if key_field and key_value not in (None, ""):
+        kv = _resolve_template_val(key_value, doc, resolved_so_far, row)
+        if kv is not None and kv != "":
+            rows = [
+                r for r in rows
+                if _fb_row_get(r, key_field) is not None
+                and str(_fb_row_get(r, key_field)).strip() == str(kv).strip()
+            ]
+
+    if not rows:
+        return default_value if aggregate != "count" else 0
+
+    if aggregate == "count":
+        return len(rows)
+
+    if not value_field:
+        return default_value
+
+    values = [_fb_row_get(r, value_field) for r in rows]
+
+    if aggregate in ("first", "last"):
+        vals = [v for v in values if v is not None]
+        if not vals:
+            return default_value
+        return _cast(vals[0] if aggregate == "first" else vals[-1], data_type)
+
+    nums = []
+    for v in values:
+        if v is None:
+            continue
+        try:
+            nums.append(float(v))
+        except (TypeError, ValueError):
+            continue
+    if not nums:
+        return default_value
+    if aggregate == "sum":
+        result = sum(nums)
+    elif aggregate == "avg":
+        result = sum(nums) / len(nums)
+    elif aggregate == "min":
+        result = min(nums)
+    elif aggregate == "max":
+        result = max(nums)
+    else:
+        return default_value
+    return _cast(result, data_type)
+
+
+def _resolve_aggregate_from_items_batch(bindings, doc, resolved_so_far):
+    """Batch: gom rows nguồn 1 lần per fingerprint, resolve key_value per-binding."""
+    results = {}
+    if not bindings:
+        return results
+    # Group configs chia sẻ rows nguồn → chỉ resolve rows 1 lần.
+    # key_value là template per-binding nên không thể gộp theo fingerprint hoàn toàn;
+    # ta resolve rows theo cfg đầu group rồi reuse cho các binding cùng rows_source.
+    cfg0 = json.loads(bindings[0].get("source_config") or "{}")
+    shared_rows = _resolve_aggregate_rows(cfg0, doc, resolved_so_far)
+
+    for b in bindings:
+        cfg = json.loads(b.get("source_config") or "{}")
+        default_value = cfg.get("default_value", b.get("default_value"))
+        data_type = b.get("data_type") or cfg.get("type", "Float")
+        key_field = cfg.get("key_field", "")
+        key_value = cfg.get("key_value", "")
+        value_field = cfg.get("value_field") or cfg.get("sum_field", "")
+        aggregate = cfg.get("aggregate", "sum")
+
+        rows = shared_rows
+        if rows is None:
+            results[b["variable_name"]] = default_value
+            continue
+
+        # Multi-field filters (Frappe-style) — snapshot/child_table lọc in-memory;
+        # doctype_query đã lọc ở get_all.
+        row = _binding_row(b, resolved_so_far)
+        if cfg.get("rows_source") != "doctype_query":
+            rows = _apply_aggregate_filters(rows, cfg, doc, resolved_so_far, row)
+
+        if key_field and key_value not in (None, ""):
+            kv = _resolve_template_val(key_value, doc, resolved_so_far, row)
+            if kv is not None and kv != "":
+                rows = [
+                    r for r in rows
+                    if _fb_row_get(r, key_field) is not None
+                    and str(_fb_row_get(r, key_field)).strip() == str(kv).strip()
+                ]
+
+        if not rows:
+            results[b["variable_name"]] = default_value if aggregate != "count" else 0
+            continue
+
+        if aggregate == "count":
+            results[b["variable_name"]] = len(rows)
+            continue
+
+        if not value_field:
+            results[b["variable_name"]] = default_value
+            continue
+
+        values = [_fb_row_get(r, value_field) for r in rows]
+        if aggregate in ("first", "last"):
+            vals = [v for v in values if v is not None]
+            results[b["variable_name"]] = (
+                default_value if not vals else _cast(vals[0] if aggregate == "first" else vals[-1], data_type)
+            )
+            continue
+
+        nums = []
+        for v in values:
+            if v is None:
+                continue
+            try:
+                nums.append(float(v))
+            except (TypeError, ValueError):
+                continue
+        if not nums:
+            results[b["variable_name"]] = default_value
+            continue
+        if aggregate == "sum":
+            result = sum(nums)
+        elif aggregate == "avg":
+            result = sum(nums) / len(nums)
+        elif aggregate == "min":
+            result = min(nums)
+        elif aggregate == "max":
+            result = max(nums)
+        else:
+            results[b["variable_name"]] = default_value
+            continue
+        results[b["variable_name"]] = _cast(result, data_type)
+
+    return results
+
+
+_handle_aggregate_from_items.resolve_batch = _resolve_aggregate_from_items_batch

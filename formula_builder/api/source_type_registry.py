@@ -151,6 +151,11 @@ def _validate_against_schema(
         # Required fields
         for req in schema.get("required", []):
             if req not in config or config[req] is None:
+                # Conditional required: bỏ qua nếu required_unless[req] thỏa mãn
+                # (vd value_field không bắt buộc khi aggregate == "count").
+                unless = (schema.get("required_unless") or {}).get(req)
+                if unless and config.get(unless.get("if")) == unless.get("equals"):
+                    continue
                 errors.append(f"{path}.{req}: required field missing")
 
         # Properties
