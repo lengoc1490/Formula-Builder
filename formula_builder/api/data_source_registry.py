@@ -2563,6 +2563,18 @@ def _resolve_aggregate_rows(cfg, doc, resolved_so_far):
     """
     rows_source = cfg.get("rows_source", "snapshot")
 
+    if rows_source == "resolved":
+        # rows đã được resolve sẵn trong context (resolved_so_far[rows_var]).
+        # Dùng cho aggregation TRÊN KẾT QUẢ TÍNH TOÁN runtime (vd B5 gom
+        # line_total theo cost_bucket từ bom_result đã tính ở B4) — rows nguồn
+        # không nằm ở snapshot (snapshot chỉ lưu config/formula, không lưu
+        # line_total) mà nằm trong pre_resolved của BatchBindingResolver.
+        rows_var = cfg.get("rows_var", "rows")
+        rows = (resolved_so_far or {}).get(rows_var)
+        if not isinstance(rows, (list, tuple)):
+            return None
+        return [r for r in rows if isinstance(r, dict)]
+
     if rows_source == "child_table":
         child_field = cfg.get("child_table_field", "")
         if not doc or not child_field:
@@ -2716,9 +2728,10 @@ def _apply_aggregate_filters(rows, cfg, doc, resolved_so_far, row):
     label="Aggregate From Items (sumif-style)",
     description=(
         "Sum/aggregate a field from a set of rows (snapshot JSON, current child table, "
-        "or a doctype query) filtered by key_field == key_value — like SUMIF. "
-        "Optional multi-field `filters` (Frappe-style list) apply to every rows_source "
-        "and combine AND with key_field/key_value. Replaces the pure-Python dict helper "
+        "a doctype query, or an already-resolved in-memory list) filtered by "
+        "key_field == key_value — like SUMIF. Optional multi-field `filters` "
+        "(Frappe-style list) apply to every rows_source and combine AND with "
+        "key_field/key_value. Replaces the pure-Python dict helper "
         "fb_handlers.cost_bucket_aggregate for AL Cost Bucket. When key_value is empty, "
         "aggregates over all rows (AGGREGATE node)."
     ),
@@ -2729,7 +2742,8 @@ def _apply_aggregate_filters(rows, cfg, doc, resolved_so_far, row):
             "value_field": {"if": "aggregate", "equals": "count"},
         },
         "properties": {
-            "rows_source": {"type": "string", "enum": ["snapshot", "child_table", "doctype_query"], "description": "Where to read the source rows from."},
+            "rows_source": {"type": "string", "enum": ["snapshot", "child_table", "doctype_query", "resolved"], "description": "Where to read the source rows from. 'resolved' reads an already-computed list from resolved_so_far[rows_var] — dùng để aggregate trên kết quả tính toán runtime (vd B5 gom line_total theo cost_bucket)."},
+            "rows_var": {"type": "string", "description": "Variable name holding the rows list when rows_source='resolved' (default 'rows')."},
             "snapshot_doctype": {"type": "string", "description": "DocType holding the snapshot (rows_source=snapshot)."},
             "snapshot_name": {"type": "string", "description": "Name of the snapshot doc; supports {{doc.field}}, {{resolved.field}} templates. Falls back to resolved_so_far[snapshot_doctype] or doc[snapshot_doctype]."},
             "snapshot_field": {"type": "string", "description": "Field on the snapshot doc holding the JSON data (default 'snapshot')."},
@@ -2751,6 +2765,7 @@ def _apply_aggregate_filters(rows, cfg, doc, resolved_so_far, row):
     batchable=True,
     fingerprint_fn=lambda cfg: "aggregate_from_items:" + "|".join([
         cfg.get("rows_source", "snapshot"),
+        cfg.get("rows_var", ""),
         cfg.get("snapshot_doctype", ""),
         cfg.get("snapshot_field", "snapshot"),
         cfg.get("rows_path", "items"),

@@ -622,6 +622,106 @@ class TestAggregateFromItemsSnapshot(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 6b. aggregate_from_items — resolved (rows từ context — AL B5 aggregation)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestAggregateFromItemsResolved(unittest.TestCase):
+    """rows_source='resolved' — rows là list dict đã resolve trong context.
+
+    Dùng cho AL B5: gom line_total theo cost_bucket từ bom_result (đã tính ở
+    B4) đưa vào pre_resolved={'bom_lines': [...]} của BatchBindingResolver.
+    """
+
+    def setUp(self):
+        self.log = mock.patch.object(frappe, "log_error")
+        self.log.start()
+        self.addCleanup(self.log.stop)
+
+    def _cfg(self, **over):
+        cfg = {
+            "rows_source": "resolved",
+            "rows_var": "bom_lines",
+            "key_field": "cost_bucket",
+            "value_field": "line_total",
+            "aggregate": "sum",
+        }
+        cfg.update(over)
+        return cfg
+
+    def test_sum_by_key(self):
+        cfg = self._cfg(key_value="PHU_KIEN")
+        b = _afb(cfg)
+        res = _handle_aggregate_from_items(b, None, {"bom_lines": COST_LINES})
+        self.assertEqual(res, 40.0)
+
+    def test_sum_other_key(self):
+        cfg = self._cfg(key_value="NVL")
+        b = _afb(cfg)
+        self.assertEqual(_handle_aggregate_from_items(b, None, {"bom_lines": COST_LINES}), 20.0)
+
+    def test_sum_all_when_key_empty(self):
+        cfg = self._cfg(key_value="")
+        b = _afb(cfg)
+        self.assertEqual(_handle_aggregate_from_items(b, None, {"bom_lines": COST_LINES}), 60.0)
+
+    def test_key_value_template(self):
+        # key_value dùng {{resolved.bucket_code}} — giống binding B5 per-bucket
+        cfg = self._cfg(key_value="{{resolved.bucket_code}}")
+        b = _afb(cfg)
+        self.assertEqual(
+            _handle_aggregate_from_items(b, None, {"bom_lines": COST_LINES, "bucket_code": "NVL"}),
+            20.0,
+        )
+
+    def test_missing_rows_var_returns_default(self):
+        # không có bom_lines trong context → default (rows source lỗi)
+        cfg = self._cfg(key_value="NVL")
+        b = _afb(cfg, default_value=0)
+        self.assertEqual(_handle_aggregate_from_items(b, None, {}), 0)
+
+    def test_non_list_rows_var_returns_default(self):
+        cfg = self._cfg(key_value="NVL")
+        b = _afb(cfg, default_value=0)
+        self.assertEqual(_handle_aggregate_from_items(b, None, {"bom_lines": "not-a-list"}), 0)
+
+    def test_count(self):
+        cfg = self._cfg(key_value="{{resolved.bucket_code}}", aggregate="count")
+        b = _afb(cfg, data_type="Int")
+        self.assertEqual(
+            _handle_aggregate_from_items(b, None, {"bom_lines": COST_LINES, "bucket_code": "PHU_KIEN"}),
+            2,
+        )
+
+    def test_batch_shared_rows(self):
+        # batch path: shared rows từ rows_var — mỗi binding resolve key riêng
+        b1 = _afb(self._cfg(key_value="PHU_KIEN"), variable_name="pk")
+        b2 = _afb(self._cfg(key_value="NVL"), variable_name="nvl")
+        res = _resolve_aggregate_from_items_batch([b1, b2], None, {"bom_lines": COST_LINES})
+        self.assertEqual(res["pk"], 40.0)
+        self.assertEqual(res["nvl"], 20.0)
+
+    def test_schema_allows_resolved_and_rows_var(self):
+        registry = SourceTypeRegistry.get_instance()
+        errors = registry.validate_source_config(
+            "aggregate_from_items",
+            {"rows_source": "resolved", "rows_var": "bom_lines", "key_field": "cost_bucket",
+             "value_field": "line_total", "aggregate": "sum"},
+        )
+        self.assertEqual(errors, [])
+        schema = registry.get_config_schema("aggregate_from_items")
+        self.assertIn("resolved", schema["properties"]["rows_source"]["enum"])
+        self.assertIn("rows_var", schema["properties"])
+
+    def test_fingerprint_includes_rows_var(self):
+        fn = get_handler("aggregate_from_items").fingerprint_fn
+        cfg_a = {"rows_source": "resolved", "rows_var": "bom_lines",
+                 "key_field": "cost_bucket", "value_field": "line_total", "aggregate": "sum"}
+        cfg_b = dict(cfg_a, rows_var="other_lines")
+        self.assertNotEqual(fn(cfg_a), fn(cfg_b))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 7. aggregate_from_items — batch
 # ═══════════════════════════════════════════════════════════════════════════
 
