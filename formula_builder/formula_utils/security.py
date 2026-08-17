@@ -32,6 +32,8 @@ class SecurityValidator(ast.NodeVisitor):
         '__class__', '__bases__', '__mro__', '__subclasses__',
         '__builtins__', '__globals__', '__code__', '__func__',
         '__self__', '__dict__', '__module__', '__qualname__',
+        # attribute traversal — getattr/setattr/delattr là vector sandbox-escape
+        'getattr', 'setattr', 'delattr',
         # other dangerous builtins not in __builtins__={}
         'breakpoint', 'input', 'print', 'help', 'quit', 'exit',
     })
