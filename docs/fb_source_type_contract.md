@@ -160,9 +160,9 @@ Scope semantics (global / doctype / doctype+field) là luật DUY NHẤT đặt 
 
 ```python
 from formula_builder.api.binding_scope import (
-    binding_matches_scope,     # 1 binding có áp cho scope (doctype, field)?
-    filter_bindings_for_scope, # filter python-side 1 danh sách
-    get_scope_bindings,        # fetch DB active theo scope + filter
+    binding_matches_scope,        # 1 binding có áp cho scope (doctype, field)?
+    filter_bindings_for_scope,    # filter python-side 1 danh sách (1 doctype)
+    get_scope_bindings,           # fetch DB active theo scope (1 doctype) + filter
 )
 ```
 
@@ -171,4 +171,67 @@ from formula_builder.api.binding_scope import (
   theo `applies_to_doctype` (tránh lệch preview vs runtime).
 - Chi tiết triển khai + lý do chọn Autocomplete: `docs/design/fvb-single-resolution-layer.md`
   §10. Điểm phối hợp DEV1: §11 file đó.
+
+### 9.1 Pricing binding scope — pattern khuyến nghị cho app (alumglass `_get_pricing_bindings`)
+
+**Bối cảnh:** pricing resolve theo **row-context** (item_code / price_base_item /
+category) — lúc FETCH không có 1 doc/doctype gốc duy nhất. Scope lịch sử của pricing
+binding là **tập doctype** `["", "Quotation Item", "AL Bom Item"]`: binding global
+(`COMPOSITE_MATERIAL_PRICE`) + binding có thể khai báo riêng cho Quotation Item hoặc AL
+Bom Item. Yêu cầu A5: **tôn trọng `applies_to_field` khi SET; khi KHÔNG set → giữ nguyên
+hành vi cũ** (binding áp cho mọi field của doctype đó).
+
+Bộ hàm scope **đa doctype** (additive, `api/binding_scope.py` — Phase 2/3/4):
+
+```python
+from formula_builder.api.binding_scope import (
+    binding_matches_any_doctype,        # 1 binding áp cho TẬP doctype không?
+    filter_bindings_for_scope_multi,    # filter python-side theo tập doctype
+    get_scope_bindings_multi,           # fetch DB active theo tập doctype (+ source_type)
+)
+```
+
+- `binding_matches_any_doctype(binding, doctypes, field="")` — global (cả 2 rỗng) → True;
+  `applies_to_doctype` ∈ doctypes → xét field như `binding_matches_scope`; binding
+  doctype-rỗng nhưng field-set (field-only, KHÔNG global) → không khớp doctype cụ thể
+  nào → False (đồng nhất `get_live_context`).
+- `get_scope_bindings_multi(doctypes, field="", source_types=None, ...)` — DB prefilter
+  `applies_to_doctype in ["", *doctypes]` + optional `source_type in source_types`, rồi
+  python filter `binding_matches_any_doctype`. `doctypes` rỗng → đồng nhất
+  `get_scope_bindings("")` (chỉ global).
+
+**Pattern khuyến nghị cho `_get_pricing_bindings`** (fetch 1 lần cho cả run, rồi ép
+field theo row context):
+
+```python
+PRICING_DOCTYPES = ("Quotation Item", "AL Bom Item")
+PRICING_SOURCE_TYPES = ("composite_key_lookup", "aluminum_price_composite")
+
+# 1) Fetch ứng viên pricing binding đúng scope đa doctype (is_active + source_type).
+bindings = get_scope_bindings_multi(
+    doctypes=PRICING_DOCTYPES,
+    source_types=PRICING_SOURCE_TYPES,
+    order_by="resolve_priority asc",
+)
+# 2) Resolve theo row: row thuộc doctype cụ thể → ép applies_to_field
+#    bằng filter_bindings_for_scope(bindings, row_doctype, row_field) — KHÔNG
+#    tự viết lại luật field ở app. Nếu 1 row có thể thuộc nhiều doctype (vd cùng
+#    item vừa là AL Bom Item vừa là Quotation Item) → giữ nguyên bộ ứng viên và
+#    để handler/source_config quyết theo context, đừng bóp field ở fetch.
+```
+
+Lưu ý semantics (đã unit-test trong `test_platform_phase1` A5 multi-doctype):
+
+| Binding (`applies_to_doctype`/`field`) | Kết quả match scope đa doctype |
+|---|---|
+| `""` / `""` (global) | Luôn True — áp mọi row, mọi doctype. |
+| `"Quotation Item"` / `""` | True khi doctype row = Quotation Item (mọi field). |
+| `"Quotation Item"` / `"unit_price"` | True chỉ khi row = Quotation Item + field = unit_price (hoặc caller không đưa field). |
+| `"AL Bom Item"` / `""` | True khi doctype row = AL Bom Item. |
+| `""` / `"unit_price"` (field-only) | **False** trên scope có doctype cụ thể — không global, không áp. |
+| doctype NGOÀI tập (vd `"Sales Order Item"`) | False. |
+
+Khi binding **KHÔNG set** `applies_to_field` → áp mọi field của doctype khớp (không đổi
+kết quả so với hành vi cũ). Khi **set** → chỉ khớp đúng field của row. Đây chính là chuẩn
+`get_live_context` mà `_get_pricing_bindings` phải theo để preview ≡ runtime.
 

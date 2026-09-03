@@ -2,6 +2,10 @@
 
 Aggregate một field từ tập rows (snapshot JSON, child table hiện tại, hoặc query doctype) lọc theo `key_field == key_value` — giống **SUMIF**. Hỗ trợ thêm **multi-field `filters`** (Frappe-style) áp dụng cho mọi rows_source — thay được helper python thuần dict `fb_handlers.cost_bucket_aggregate` cho AL Cost Bucket.
 
+> **Cập nhật 2026-09-03:** `cost_bucket_aggregate` (legacy alumglass) chính thức **retired →
+> `aggregate_from_items`** — xem mục "Migration từ `cost_bucket_aggregate` (legacy alumglass)
+> → `aggregate_from_items`" ở cuối tài liệu (contract chuẩn cho DEV1 + migration tương lai).
+
 - Registered: `aggregate_from_items`
 - Module: `formula_builder/api/data_source_registry.py`
 - Decorator: `@register_source` (canonical từ `source_type_registry`) — decorate trực tiếp `_handle_aggregate_from_items`
@@ -191,3 +195,86 @@ Với mỗi dòng quotation đang tính (`row.cost_bucket` = `NVL`, `PHU_KIEN`, 
 ## Tests
 
 `formula_builder/tests/test_fb1_revised.py` — `TestAggregateFromItemsRegistration` (schema required + `required_unless` cho count), `TestAggregateFromItemsChildTable` (sum PK / all / count / **multi-field filter** / `in` op), `TestAggregateFromItemsDoctypeQuery` (sum NVL / template filter), `TestAggregateFromItemsSnapshot` (sum theo bucket / **multi-field filter** / JSON path / missing snapshot default), `TestAggregateFromItemsBatch` (dùng chung rows nguồn), `TestAggregateFromItemsSumFieldAlias` (alias `sum_field` — sum, template key, count, ưu tiên `value_field`, batch, fingerprint resolve).
+
+## Migration từ `cost_bucket_aggregate` (legacy alumglass) → `aggregate_from_items`
+
+> **Contract chính thức (2026-09-03)** — reference cho DEV1 migrate Cost Bucket alumglass và
+> cho migration tương lai. Handler legacy `cost_bucket_aggregate`
+> (`alumglass/fb_handlers.py`, deprecated) tự gom line_total theo bucket từ
+> `AL BOM Version.bom_set_snapshot.items`; `aggregate_from_items` thay thế toàn bộ bằng
+> config — KHÔNG cần code app-side riêng. Xem thêm ADR
+> `docs/design/fvb-single-resolution-layer.md` §12.2.
+
+### Bảng mapping cấu hình cũ → mới
+
+| `cost_bucket_aggregate` (legacy) | `aggregate_from_items` (FB) | Ghi chú |
+| --- | --- | --- |
+| `filter_by: {field: value}` (object, **AND**) | `filters: [["field","=",value], ...]` (list, **AND**) | Value hỗ trợ template `{{row.*}}`/`{{doc.*}}`/`{{resolved.*}}`; operator `=`, `!=`, `>`, `<`, `>=`, `<=`, `like`, `in`, `not in`. Multi-field lọc đồng thời như `filter_by` cũ. |
+| `sum_field` (mặc định `"line_total"`) | **`value_field`** (canonical) | **Schema FVB yêu cầu `value_field`** (trừ `aggregate=count`) — migration NÊN ghi `value_field`. Alias `sum_field` vẫn đọc khi `value_field` rỗng nhưng KHÔNG được schema công nhận khi validate binding. |
+| (rows nguồn cố định) snapshot AL BOM Version | `rows_source: "snapshot"` | — |
+| — | `snapshot_doctype: "AL BOM Version"` | Doctype chứa snapshot. |
+| Đọc `resolved_so_far["bom_version"]` làm tên doc | `snapshot_name: "{{resolved.bom_version}}"` | Legacy lấy docname từ resolved var `bom_version`. Nếu context khác (vd doc có link `bom_version`) dùng `{{doc.bom_version}}`. Fallback khi trống: `resolved_so_far[snapshot_doctype]` → `doc[snapshot_doctype]`. |
+| Đọc `AL BOM Version.bom_set_snapshot` | `snapshot_field: "bom_set_snapshot"` | **Mặc định platform là `"snapshot"`** — AL dùng `bom_set_snapshot` nên BẮT BUỘC set tường minh (config, không phải platform change). |
+| `json.loads(...)["items"]` | `rows_path: "items"` | Mặc định platform là `"items"` — có thể bỏ qua nhưng ghi tường minh cho rõ. |
+| `total += item[sum_field]` mọi item khớp `filter_by` | `aggregate: "sum"` | Giữ nguyên ngữ nghĩa. |
+| — | `key_field`/`key_value` | (tuỳ chọn) Nếu bucket cũ chỉ lọc 1 field `cost_bucket == X` có thể dùng `key_field/key_value` thay `filters` — nhưng giữ `filters` nếu muốn AND nhiều field + `key_field` cùng lúc. |
+| (không có) | `default_value` | (tuỳ chọn) Giá trị khi không có row khớp (mặc định 0). |
+
+### Ví dụ migrate 1 bucket
+
+Cost Bucket legacy `NVL` (config cũ):
+
+```json
+{
+  "source_type": "cost_bucket_aggregate",
+  "source_config": {
+    "filter_by": {"cost_bucket": "NVL", "is_active": "1"},
+    "sum_field": "line_total"
+  }
+}
+```
+
+→ Binding FVB `aggregate_from_items` mới:
+
+```json
+{
+  "source_type": "aggregate_from_items",
+  "variable_name": "bucket_nvl_total",
+  "data_type": "Currency",
+  "source_config": {
+    "rows_source": "snapshot",
+    "snapshot_doctype": "AL BOM Version",
+    "snapshot_name": "{{resolved.bom_version}}",
+    "snapshot_field": "bom_set_snapshot",
+    "rows_path": "items",
+    "filters": [
+      ["cost_bucket", "=", "NVL"],
+      ["is_active", "=", "1"]
+    ],
+    "value_field": "line_total",
+    "aggregate": "sum",
+    "default_value": 0
+  }
+}
+```
+
+### Lưu ý khi migrate
+
+1. **`value_field` bắt buộc trong schema FVB** (trừ `aggregate=count`). Config chỉ có
+   `sum_field` sẽ **fail** `validate_binding_source_config`/`test_data_source` dù handler
+   runtime đọc được alias. Migrate bằng cách ghi `value_field` = giá trị `sum_field` cũ.
+2. **`filters` là list AND** — thay `filter_by` object 1-1; mọi key `filter_by` cũ thành 1
+   phần tử `[field, "=", value]` trong list. Operator `in` cần value là list.
+3. **`snapshot_name` phải tường minh** khi nguồn docname là resolved var (legacy dùng
+   `resolved_so_far["bom_version"]`) — `{{resolved.bom_version}}`. Nếu bỏ trống, fallback
+   tìm `resolved_so_far["AL BOM Version"]`/`doc["AL BOM Version"]` (KHÔNG phải key
+   `bom_version`) → dễ miss snapshot, trả `default_value`.
+4. **`snapshot_field` mặc định `"snapshot"`** — AL BOM Version chứa JSON ở
+   `bom_set_snapshot` nên phải set tường minh.
+5. Hành vi sum so với legacy: `_match_filter_value` so sánh **string-normalized**
+   (`str(row_val).strip() == str(target).strip()`) cho `=` — giữ tương đương `filter_by` cũ.
+   Khác biệt nhỏ: giá trị non-numeric của `value_field` bị bỏ qua (legacy cộng `or 0`).
+6. Batch/cache/transform nay có sẵn (legacy `batchable=False`) — resolve nhiều bucket cùng
+   snapshot chỉ đọc rows nguồn 1 lần.
+7. Giữ handler legacy trong vài chu kỳ nếu cần rollback nhanh (config cũ vẫn đọc được);
+   ngừng đăng ký ở app-side khi migration xong (xem `hooks.py::fb_source_types`).
