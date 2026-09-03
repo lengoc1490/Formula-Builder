@@ -31,8 +31,10 @@ from formula_builder.api.batch_binding_resolver import (
     _is_batchable,
 )
 from formula_builder.api.binding_scope import (
+    binding_matches_any_doctype,
     binding_matches_scope,
     filter_bindings_for_scope,
+    filter_bindings_for_scope_multi,
 )
 
 from formula_builder.api.data_source_registry import (
@@ -294,6 +296,101 @@ class TestBindingScope(unittest.TestCase):
                filter_bindings_for_scope(bindings, "Quotation Item", "total")]
         # g2: doctype rỗng nhưng field 'other' — không khớp 'total' trên doctype cụ thể.
         self.assertEqual(got, ["g", "w"])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# A5 — binding_scope đa doctype (pattern pricing: KHÔNG có 1 doc đơn,
+#       doctype list ["", "Quotation Item", "AL Bom Item"] — Phase 2/3/4)
+# ═══════════════════════════════════════════════════════════════════════════
+
+PRICING_DOCTYPES = ("Quotation Item", "AL Bom Item")
+
+
+class TestBindingScopeMultiDoctype(unittest.TestCase):
+    def test_global_matches_any_doctype(self):
+        g = {"variable_name": "g", "applies_to_doctype": "", "applies_to_field": ""}
+        self.assertTrue(binding_matches_any_doctype(g, PRICING_DOCTYPES, ""))
+        self.assertTrue(binding_matches_any_doctype(g, PRICING_DOCTYPES, "total"))
+
+    def test_doctype_in_set_field_blank_matches(self):
+        # Binding doctype-scoped, không set field → áp mọi field của doctype đó.
+        b = {"variable_name": "d", "applies_to_doctype": "Quotation Item",
+             "applies_to_field": ""}
+        self.assertTrue(binding_matches_any_doctype(b, PRICING_DOCTYPES, "total"))
+        self.assertTrue(binding_matches_any_doctype(b, PRICING_DOCTYPES, ""))
+
+    def test_doctype_in_set_field_match(self):
+        b = {"variable_name": "df", "applies_to_doctype": "AL Bom Item",
+             "applies_to_field": "unit_price"}
+        self.assertTrue(binding_matches_any_doctype(b, PRICING_DOCTYPES, "unit_price"))
+
+    def test_doctype_in_set_field_mismatch_rejected(self):
+        b = {"variable_name": "df", "applies_to_doctype": "Quotation Item",
+             "applies_to_field": "unit_price"}
+        self.assertFalse(binding_matches_any_doctype(b, PRICING_DOCTYPES, "base"))
+        # vẫn khớp khi caller không cung cấp field (không đổi hành vi cũ).
+        self.assertTrue(binding_matches_any_doctype(b, PRICING_DOCTYPES, ""))
+
+    def test_doctype_outside_set_rejected(self):
+        b = {"variable_name": "o", "applies_to_doctype": "Sales Order Item",
+             "applies_to_field": ""}
+        self.assertFalse(binding_matches_any_doctype(b, PRICING_DOCTYPES, ""))
+        b2 = {"variable_name": "o2", "applies_to_doctype": "Sales Order Item",
+              "applies_to_field": "total"}
+        self.assertFalse(binding_matches_any_doctype(b2, PRICING_DOCTYPES, "total"))
+
+    def test_doctype_empty_field_set_excluded_on_concrete_scope(self):
+        # Binding field-only (doctype rỗng) — KHÔNG global → không khớp doctype
+        # cụ thể nào trong tập pricing (đồng nhất get_live_context với context
+        # có doctype cụ thể).
+        b = {"variable_name": "x", "applies_to_doctype": "", "applies_to_field": "other"}
+        self.assertFalse(binding_matches_any_doctype(b, PRICING_DOCTYPES, ""))
+        self.assertFalse(binding_matches_any_doctype(b, PRICING_DOCTYPES, "other"))
+
+    def test_empty_doctype_set_delegates_no_doctype_semantics(self):
+        # doctypes rỗng (không có doctype context) → defer đúng
+        # binding_matches_scope(binding, "", field) — đồng nhất
+        # get_scope_bindings(doctype="") của scope 1 doctype.
+        global_b = {"variable_name": "g", "applies_to_doctype": "", "applies_to_field": ""}
+        self.assertTrue(binding_matches_any_doctype(global_b, (), ""))
+        # Binding gắn doctype cụ thể KHÔNG khớp khi không có doctype context.
+        dt = {"variable_name": "dt", "applies_to_doctype": "Quotation Item",
+              "applies_to_field": ""}
+        self.assertFalse(binding_matches_any_doctype(dt, (), "total"))
+        dt2 = {"variable_name": "dt2", "applies_to_doctype": "Quotation Item",
+               "applies_to_field": "unit_price"}
+        self.assertFalse(binding_matches_any_doctype(dt2, (), "unit_price"))
+
+    def test_accepts_single_doctype_str(self):
+        b = {"variable_name": "d", "applies_to_doctype": "Quotation Item",
+             "applies_to_field": ""}
+        self.assertTrue(binding_matches_any_doctype(b, "Quotation Item", "total"))
+        self.assertFalse(binding_matches_any_doctype(b, "AL Bom Item", "total"))
+
+    def test_filter_multi_composition(self):
+        bindings = [
+            {"variable_name": "g", "applies_to_doctype": "", "applies_to_field": ""},
+            {"variable_name": "qi", "applies_to_doctype": "Quotation Item", "applies_to_field": ""},
+            {"variable_name": "qi_total", "applies_to_doctype": "Quotation Item", "applies_to_field": "total"},
+            {"variable_name": "bom", "applies_to_doctype": "AL Bom Item", "applies_to_field": "unit_price"},
+            {"variable_name": "so", "applies_to_doctype": "Sales Order Item", "applies_to_field": ""},
+        ]
+        # Lọc theo tập doctype pricing, không có field → g, qi, qi_total, bom
+        # (so nằm ngoài tập; field-chỉ định không bị ép vì không có field context).
+        got = [b["variable_name"] for b in
+               filter_bindings_for_scope_multi(bindings, PRICING_DOCTYPES, "")]
+        self.assertEqual(got, ["g", "qi", "qi_total", "bom"])
+        # Với field context "unit_price": global + binding khớp doctype+field
+        # (bom). qi (doctype-scoped, không set field) áp mọi field của Quotation
+        # Item → vẫn giữ (đúng luật "không set field = áp mọi field", không đổi
+        # kết quả khi binding không set applies_to_field).
+        got2 = [b["variable_name"] for b in
+                filter_bindings_for_scope_multi(bindings, PRICING_DOCTYPES, "unit_price")]
+        self.assertEqual(got2, ["g", "qi", "bom"])
+        # doctypes rỗng → chỉ global (đồng nhất get_scope_bindings("")).
+        got3 = [b["variable_name"] for b in
+                filter_bindings_for_scope_multi(bindings, (), "")]
+        self.assertEqual(got3, ["g"])
 
 
 if __name__ == "__main__":
