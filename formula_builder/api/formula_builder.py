@@ -9,6 +9,7 @@ from formula_builder.api.variable_resolver import ScopeContext, VariableResolver
 from formula_builder.api.data_source_registry import (
     resolve_bindings_with_deps,
 )
+from formula_builder.api.binding_scope import get_scope_bindings
 from formula_builder.api.settings_cache import (
     get_allowed_funcs,
     get_max_formula_length,
@@ -290,43 +291,15 @@ def get_live_context(scope_context_json):
         except Exception:
             target_field = ""
 
-        # ── 1. Fetch active bindings — filter DB-side ──
-        # Chỉ lấy: global bindings (doctype="") HOẶC bindings cho doctype hiện tại
-        db_filters = [
-            ["is_active", "=", 1],
-        ]
-        if doctype:
-            db_filters.append(
-                ["applies_to_doctype", "in", ["", doctype]]
-            )
-        try:
-            all_bindings = frappe.get_all(
-                "Formula Variable Binding",
-                filters=db_filters,
-                fields=[
-                    "name", "variable_name", "variable_label", "source_type",
-                    "source_config", "resolve_priority", "applies_to_doctype",
-                    "applies_to_field", "is_global", "data_type", "default_value",
-                ],
-                order_by="resolve_priority asc",
-            ) or []
-        except Exception:
-            all_bindings = []
-
-        # Lọc applies_to_field trong Python (không thể filter hiệu quả trong DB)
-        bindings = []
-        for b in all_bindings:
-            b_doctype = b.get("applies_to_doctype") or ""
-            b_field = b.get("applies_to_field") or ""
-
-            # Global: applies everywhere
-            if not b_doctype and not b_field:
-                bindings.append(b)
-                continue
-            # Doctype-specific: lọc thêm theo field
-            if b_doctype == doctype:
-                if not b_field or b_field == target_field or not target_field:
-                    bindings.append(b)
+        # ── 1. Fetch active bindings theo scope semantics chuẩn ──
+        # (A5 — Phase 1) Luật filter scope tập trung tại binding_scope: global +
+        # doctype + doctype/field. Query DB-side lọc is_active + doctype trước,
+        # Python-side lọc applies_to_field — hành vi giữ nguyên 100% so với code cũ.
+        bindings = get_scope_bindings(
+            doctype=doctype,
+            field=target_field,
+            order_by="resolve_priority asc",
+        )
 
         # ── 2. Get current document ──
         doc = None
