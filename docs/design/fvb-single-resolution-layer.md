@@ -1,14 +1,20 @@
 # ADR: FVB — Single Resolution Layer cho Formula Builder
 
-> **Status:** ✅ Approved — Owner duyệt 2026-08-31, không cần chỉnh. Quyết định triển khai:
-> **dừng ở design**, chưa triển khai (Phase 0-4 trong §6 chờ kế hoạch/app cụ thể).
-> **Date:** 2026-08-31
+> **Status:** ✅ Approved + **đã triển khai (platform)** — Owner duyệt 2026-08-31.
+> Platform formula_builder Phase 0–4 đã merge 2026-09-03: Phase 0–1 code + test (§10),
+> Phase 2–4 contract/docs (§12). Alumglass adopt theo job
+> `2026-09-03_alumglass-patch3-merge-fb-platform-ph0-1` (app-side DEV1, xem §11/§12).
+> **Date:** 2026-08-31 (approved) — trạng thái cập nhật 2026-09-03
 > **Author:** SA1
 > **Reviewer:** Elon + Owner (2026-08-31)
 > **Scope:** formula_builder (platform) + alumglass (app tiêu biểu)
-> **Liên quan:** `docs/fb_source_type_contract.md`, `alumglass/docs/design/fvb-seed.md`,
-> `alumglass/docs/quotation-pricing-flow.md` (§2.2, §6)
-> **Trạng thái triển khai:** chưa có code change — design note thuần túy.
+> **Liên quan:** `docs/fb_source_type_contract.md` (§9/§9.1), `alumglass/docs/design/fvb-seed.md`,
+> `alumglass/docs/quotation-pricing-flow.md` (§2.2, §6),
+> `alumglass/docs/design/p3-quotation-pricing-patch-3-full.md`
+> **Trạng thái triển khai:** platform Phase 0–4 delivered — Phase 1 (A1–A5) §10, Phase 2–4
+> (contract migration bucket + pricing scope đa doctype + docs) §12. Alumglass adopt song
+> song job 2026-09-03 — chi tiết adopt xem file p3 alumglass + docs DEV1 cùng job (KHÔNG
+> verify site theo job scope).
 
 ---
 
@@ -521,6 +527,13 @@ Files: `doctype/formula_variable_binding/formula_variable_binding.json`,
 - Vì sao: `_get_pricing_bindings` (alumglass) filter chỉ theo doctype, bỏ qua
   `applies_to_field` → preview scope lệch runtime. App nghiệp vụ giờ import 3 hàm này để
   dùng chung 1 luật (xem §11).
+- **Bổ sung Phase 2/3/4 (2026-09-03):** bộ hàm scope ĐA doctype cho pattern pricing
+  (KHÔNG có 1 doc đơn — fetch theo tập doctype, ép field theo row):
+  `binding_matches_any_doctype(binding, doctypes, field="")`,
+  `filter_bindings_for_scope_multi(bindings, doctypes, field="")`,
+  `get_scope_bindings_multi(doctypes, field="", source_types=None, ...)`.
+  Semantics + pattern khuyến nghị cho app: `docs/fb_source_type_contract.md` §9.1,
+  unit-test A5 multi-doctype trong `test_platform_phase1` (xem §12).
 
 ### 10.6 Test & gate (Phase 1)
 
@@ -542,10 +555,12 @@ Files: `doctype/formula_variable_binding/formula_variable_binding.json`,
 DEV2 chỉ làm platform (repo formula_builder). Các điểm DEV1 cần nối khi làm alumglass:
 
 1. **`_get_pricing_bindings` phải tôn trọng `applies_to_field`.** Thay vì tự lọc theo
-   `applies_to_doctype in ["", "Quotation Item", "AL Bom Item"]`, import dùng chung:
-   `from formula_builder.api.binding_scope import get_scope_bindings, filter_bindings_for_scope,
-   binding_matches_scope` — giữ đúng field semantics như `get_live_context`. KHÔNG duplicate
-   logic filter ở app.
+   `applies_to_doctype in ["", "Quotation Item", "AL Bom Item"]`, import dùng chung từ
+   `formula_builder.api.binding_scope`. Vì pricing KHÔNG có 1 doc/doctype gốc duy nhất
+   (fetch theo TẬP doctype) → dùng bộ hàm đa doctype (§10.5 bổ sung / contract §9.1):
+   `get_scope_bindings_multi(doctypes, source_types=...)` để fetch, rồi ép
+   `applies_to_field` theo row bằng `filter_bindings_for_scope`/`binding_matches_scope`.
+   KHÔNG duplicate logic filter ở app.
 2. **Scope preview batch** dùng chung `formula_builder.api.batch_binding_resolver.preview_batch_groups`
    (đã trả theo scope semantics trên) → dev BOM item/Quotation nhìn trước được nhóm nào N+1.
 3. **Test config có doc** của app dùng `test_data_source_with_doc` (không tự đẻ API tương tự).
@@ -555,5 +570,77 @@ DEV2 chỉ làm platform (repo formula_builder). Các điểm DEV1 cần nối k
    đơn lẻ → registry rỗng.
 
 Chưa thấy việc cần đụng code alumglass ở phía platform; nếu DEV1 gặp thiếu contract nào
-trong 3 hàm scope → báo lại Elon để bổ sung tại `binding_scope.py` (không sửa ở app).
+trong các hàm scope → báo lại Elon để bổ sung tại `binding_scope.py` (không sửa ở app).
+
+---
+
+## 12. Phase 2–4 — alumglass adopt + status (2026-09-03)
+
+> Ghi nhận platform-side cho job `2026-09-03_alumglass-patch3-merge-fb-platform-ph0-1`.
+> App-side alumglass do DEV1 thực hiện song song (repo alumglass) — **ADR này KHÔNG tự
+> khẳng định commit hash / trạng thái code app**; chi tiết adopt xem
+> `alumglass/docs/design/p3-quotation-pricing-patch-3-full.md` (Phase 0) + docs/usage, docs
+> DEV1 ghi trong cùng job. KHÔNG verify site (job scope: chỉ code additive/docs).
+
+### 12.1 Seed full FVB (v28_11 alumglass) + engine FB-first
+
+- Platform cung cấp đủ source_type để app seed FVB phủ mọi biến có source: 17 built-in +
+  custom alumglass (`aluminum_price_composite`, `glass_master_data`…) qua
+  `@register_source` + `hooks.py::fb_source_types`. Admin/thao tác: §5, §10 (A1–A4).
+- Engine alumglass chuyển **FB-first**: resolve qua FVB trước; path 1.3 (Variable Library /
+  Python) chỉ còn là fallback cho biến **chưa seed** trong FVB. Đây chính là Phase 2/3 lộ
+  trình §6 — platform đã đủ API/contract, việc seed + đảo ưu tiên nằm app-side (DEV1).
+- Giữ luật vàng (D3, §6): bỏ qua giá trị rỗng/None khi merge để fallback giữ giá trị thật
+  (vd `OFFSET_FRAME=48`) — golden `CDMQ-2C/4C` không đổi.
+
+### 12.2 `cost_bucket_aggregate` retired → `aggregate_from_items` (C2)
+
+- Contract migration đã chốt + ghi chính thức tại `docs/aggregate_from_items.md`
+  (mục "Migration từ `cost_bucket_aggregate` (legacy alumglass) → `aggregate_from_items`"):
+  `filter_by` dict → `filters` list AND multi-field; `sum_field` → `value_field`
+  (canonical); rows nguồn snapshot `AL BOM Version.bom_set_snapshot.items` →
+  `rows_source=snapshot` + `snapshot_field=bom_set_snapshot` + `rows_path=items`;
+  `resolved_so_far["bom_version"]` → `snapshot_name="{{resolved.bom_version}}"`.
+- Handler legacy `cost_bucket_aggregate` (alumglass `fb_handlers.py`) được gỡ/ngừng dùng ở
+  app-side; platform `aggregate_from_items` đã có từ trước (batch/cache/transform) — không
+  cần platform change (chỉ config).
+- Lưu ý schema: FVB `aggregate_from_items` yêu cầu `value_field` (trừ `aggregate=count`),
+  alias `sum_field` chỉ đọc khi `value_field` rỗng → config migrate NÊN ghi `value_field`.
+
+### 12.3 `is_pre_vat_price` / `is_final_price` line-flag
+
+- Pattern app-side (Phase 3 roadmap C3/D7): thay hardcode `al_gia_ban`/`is_final_price`
+  override bằng flag trên line/field — thuần app alumglass; platform chỉ cung cấp cơ chế
+  source_type `linked_doctype_field`/`doctype_query`/`computed` để đọc flag. Không đụng
+  platform.
+
+### 12.4 A5 hookup — `_get_pricing_bindings` dùng binding_scope (đa doctype)
+
+- Platform bổ sung hàm scope **đa doctype** (pricing không có 1 doc đơn):
+  `get_scope_bindings_multi` / `filter_bindings_for_scope_multi` /
+  `binding_matches_any_doctype` (`api/binding_scope.py` + unit-test `test_platform_phase1`
+  A5 multi-doctype). Semantics + pattern khuyến nghị: `docs/fb_source_type_contract.md`
+  §9.1.
+- App-side (DEV1): chuyển `_get_pricing_bindings` sang dùng helper này → tôn trọng
+  `applies_to_field` khi set; khi không set giữ nguyên hành vi (áp mọi field của doctype).
+
+### 12.5 Docs Phase 4 (AC A-6)
+
+| File (formula_builder) | Cập nhật 2026-09-03 |
+|---|---|
+| `docs/design/fvb-single-resolution-layer.md` (file này) | Status → đã triển khai; §10.5 bổ sung multi-doctype; §11.1 trỏ helper đa doctype; §12 = file này. |
+| `docs/aggregate_from_items.md` | Thêm mục migration chính thức `cost_bucket_aggregate` → `aggregate_from_items` (§12.2). |
+| `docs/fb_source_type_contract.md` | Thêm §9.1 "Pricing binding scope — pattern khuyến nghị cho app". |
+| `docs/design/co_che_tinh_gia_quotation.md` | Ghi chú đầu file: cơ chế mới (kính per-position, FB-max active, workflow thật, FB-first) đã merge — nội dung cũ giữ as-is lịch sử. |
+| `docs/design/de-xuat-cai-tien-quotation-pricing.md` | Status DRAFT → triển khai 2026-09-03; đánh dấu mục đã đóng. |
+| `docs/review1.md` | KHÔNG tồn tại trong repo (verified 2026-09-03) → bỏ qua, không tạo mới. |
+
+### 12.6 Status tổng platform Phase 0–4
+
+| Phase | Nội dung | Platform formula_builder |
+|---|---|---|
+| Phase 0–1 | patch-3-full merge app (DEV1) + A1–A5 platform | ✅ A1–A5 delivered §10 (2026-09-03) |
+| Phase 2–4 | seed FVB, FB-first, migrate bucket, pricing scope, docs | ✅ Contract + docs §12 (2026-09-03); code additive `binding_scope` multi-doctype |
+| App adopt | alumglass engine + seed + migrate | DEV1 song song — xem file p3 + docs DEV1 (ADR không assert commit app) |
+| Verify site | migrate/bench/golden | ⛔ NGOÀI job scope — chờ khi có site (ghi trong report DEV2) |
 

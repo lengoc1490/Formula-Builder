@@ -1,7 +1,7 @@
 # Đề xuất cải tiến cơ chế tính giá Quotation — hợp nhất Formula Builder + AlumGlass
 
-> **Status:** DRAFT — chờ Owner review 2026-09-01 (chưa có code change)
-> **Date:** 2026-09-01
+> **Status:** ✅ **ĐÃ TRIỂN KHAI 2026-09-03** (Phase 0–4, job `2026-09-03_alumglass-patch3-merge-fb-platform-ph0-1`) — proposal này từng là DRAFT chờ Owner; sau khi Owner duyệt (2026-09-03) code + docs đã merge (KHÔNG verify site/golden theo job scope). Mô tả bên dưới giữ as-is làm bản ghi đề xuất — đối chiếu trạng thái thực tế: ADR `fvb-single-resolution-layer.md` §10/§12 + `alumglass/docs/design/p3-quotation-pricing-patch-3-full.md`.
+> **Date:** 2026-09-01 (đề xuất) — trạng thái cập nhật 2026-09-03
 > **Author:** SA1
 > **Scope:** formula_builder (platform) + alumglass (app case study) — 1 roadmap hợp nhất cả 2 tầng
 > **Liên quan (tham chiếu chéo, KHÔNG thay thế):**
@@ -9,6 +9,26 @@
 > - `docs/design/review1.md` — review khi áp patch-3: kính đại diện, `cost_bucket_aggregate` deprecated, FVB chưa seed, N+1 pipeline/custom_function, đề xuất `chain_link_lookup`
 > - `docs/design/fvb-single-resolution-layer.md` — ADR **Owner đã duyệt 2026-08-31** (dừng ở design, chưa triển khai): FVB = single resolution layer, 17 source_type, gap Select tĩnh 13 option, lộ trình Phase 0–4
 > **Ràng buộc vàng:** mọi phase KHÔNG được phá golden `CDMQ-2C = 22,717,289` / `CDMQ-4C = 47,430,808` (chốt dashboard 2026-08-18)
+
+---
+
+## Trạng thái triển khai theo mục (2026-09-03)
+
+> Mục nào trong proposal đã ĐÓNG (đối chiếu với code thật hiện tại):
+
+| Mục | Nội dung | Trạng thái |
+| --- | --- | --- |
+| §1.2 | Bằng chứng patch-3-full CHƯA merge app thật | ✅ **ĐÃ ĐÓNG** — Phase 0 merge 2026-09-03 (app-side DEV1, xem alumglass p3 doc). Bảng bên dưới giữ as-is để đối chiếu lịch sử. |
+| §3A A1–A5 | Platform formula_builder (FVB Admin/dropdown/test/preview/scope) | ✅ **ĐÃ ĐÓNG** — Phase 1 delivered (ADR §10, 2026-09-03). |
+| §3B | App alumglass — áp patch-3-full (Phase 0) | ✅ **ĐÃ ĐÓNG (code)** — merge song song 2026-09-03; CHƯA migrate site/golden. |
+| §3C C1 | Seed FVB đầy đủ + engine FB-first | ✅ **ĐÃ ĐÓNG (platform contract)** — app-side DEV1 (ADR §12.1). |
+| §3C C2 | Migrate `cost_bucket_aggregate` → `aggregate_from_items` | ✅ **ĐÃ ĐÓNG (contract)** — `docs/aggregate_from_items.md` mục migration (ADR §12.2). |
+| §3C C3–C5 | chain_link_lookup / batch cảnh báo / price_list seed | C5 fix app-side (install_fb_bindings seed động, xem p3 doc §E); C3/C4 là known-limitation ghi trong docs — xem lại theo quyết định DEV1. |
+| §4 Phase 1 | A1–A5 + C5 | ✅ **ĐÃ ĐÓNG** (ADR §10; C5 trong p3 doc). |
+| §4 Phase 2/3 | Seed FVB, FB-first, retire path cũ, migrate bucket | ✅ **ĐÃ ĐÓNG (code/contract)** — ADR §12.1–12.2; app-side DEV1. |
+| §4 Phase 4 | Vệ sinh + docs | ✅ **ĐÃ ĐÓNG (docs platform)** — file này + ADR §12 + co_che note. |
+| §5 AC | Golden CDMQ-2C/4C | ⛔ **CHỜ VERIFY SITE** — job scope không verify site; golden phải chạy sau migrate. |
+| §6 File map | — | Giữ as-is làm chỉ dẫn; commit thật trong log git từng repo. |
 
 ---
 

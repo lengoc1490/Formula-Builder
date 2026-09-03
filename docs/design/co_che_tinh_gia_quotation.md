@@ -20,6 +20,29 @@ Mục lục
 ## Sơ đồ tổng kết toàn bộ luồng
 ## Phụ lục — bảng tra nhanh file/hàm theo chủ đề
 ---
+
+> **GHI CHÚ MERGE (2026-09-03) — CƠ CHẾ MỚI ĐÃ MERGE, nội dung bên dưới giữ as-is lịch sử:**
+> Toàn bộ mô tả mục 1–14 bên dưới khớp code **trước** khi gói vá `alumglass-patch-3-full`
+> (V6 P10) và cơ chế FB-first được merge vào app alumglass (job
+> `2026-09-03_alumglass-patch3-merge-fb-platform-ph0-1`). Từ 2026-09-03, các cơ chế sau đã
+> **active trên code app** (chưa verify site theo job scope):
+> - **Kính/vật tư mã đại diện theo vị trí** (per-position glass): engine đọc
+>   `glass_master_map` từ dialog, `_resolve_glass_override` ưu tiên per-position → global.
+> - **FB-max pricing active + FB-first engine**: FVB seed binding
+>   `COMPOSITE_MATERIAL_PRICE` (`is_active=1`) → `_fetch_composite_prices_via_fb` chạy thật;
+>   engine resolve FVB trước, path 1.3 (Variable Library) chỉ fallback cho biến chưa seed.
+> - **Workflow thật 4 doctype** (AL BOM Version, AL Change Order, AL Dynamic Item Rule
+>   Version, AL Design Revision) — thay `workflow_state` Select tự chế.
+> - **`cost_bucket_aggregate` retired → `aggregate_from_items`**; flag
+>   `is_pre_vat_price`/`is_final_price` trên line.
+> - Pricing scope chuẩn (`binding_scope` đa doctype) — tôn trọng `applies_to_field`.
+>
+> Chi tiết adopt app: `alumglass/docs/design/p3-quotation-pricing-patch-3-full.md` +
+> docs DEV1 cùng job. Chi tiết platform: ADR `fvb-single-resolution-layer.md` §10/§12,
+> `docs/fb_source_type_contract.md` §9.1, `docs/aggregate_from_items.md` (mục migration).
+> **Nội dung các mục bên dưới KHÔNG sửa** — là bản ghi lịch sử cơ chế cũ để đối chiếu.
+
+---
 1. Bức tranh tổng quan — 3 tầng kiến trúc
 ```
 ┌───────────────────────────────────────────────────────────────────┐
