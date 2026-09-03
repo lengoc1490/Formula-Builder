@@ -652,7 +652,8 @@ def get_registry_stats() -> dict:
 def test_data_source(source_type: str, source_config: str) -> dict:
     """API: Test a data source by resolving it with given config.
 
-    Returns the resolved value or error.
+    Resolves với ``doc=None`` (chỉ test được source type không cần doc context).
+    Nếu cần test trên doc thật → dùng ``test_data_source_with_doc`` (A3).
     """
     registry = SourceTypeRegistry.get_instance()
     definition = registry.get(source_type)
@@ -669,16 +670,32 @@ def test_data_source(source_type: str, source_config: str) -> dict:
     if errors:
         return {"error": "Validation failed", "validation_errors": errors}
 
-    # Try to resolve
+    return _execute_source_test(definition, cfg, doc=None, resolved_so_far={})
+
+
+def _execute_source_test(
+    definition: SourceTypeDefinition,
+    cfg: dict,
+    doc=None,
+    resolved_so_far: Optional[Dict[str, Any]] = None,
+    data_type: str = "Float",
+) -> dict:
+    """Shared executor: build a minimal binding và gọi handler của source type.
+
+    Dùng chung cho test_data_source (doc=None) và test_data_source_with_doc
+    (doc thật + context đã resolve). KHÔNG đổi cách gọi handler — vẫn là
+    ``handler(binding, doc=doc, resolved_so_far={...})``.
+    """
     binding = {
         "variable_name": "_test_",
-        "source_type": source_type,
-        "source_config": source_config,
-        "data_type": "Float",
+        "source_type": definition.source_type,
+        "source_config": json.dumps(cfg, ensure_ascii=False),
+        "data_type": data_type,
     }
-
     try:
-        result = definition.handler(binding, doc=None, resolved_so_far={})
+        result = definition.handler(
+            binding, doc=doc, resolved_so_far=resolved_so_far or {}
+        )
         return {
             "success": True,
             "value": result,
@@ -690,3 +707,86 @@ def test_data_source(source_type: str, source_config: str) -> dict:
             "error": str(e),
             "traceback": frappe.get_traceback(),
         }
+
+
+@frappe.whitelist()
+def test_data_source_with_doc(
+    source_type: str,
+    source_config: str,
+    doctype: Optional[str] = None,
+    docname: Optional[str] = None,
+    resolved_context_json: str = "{}",
+    data_type: str = "Float",
+) -> dict:
+    """API (A3): Test một source config trên doc thật + context đã resolve.
+
+    Khắc phục giới hạn của test_data_source (doc=None). Cho phép test
+    linked_doctype_field / composite_key_lookup / pipeline / aggregate_from_items
+    ... với một doc cụ thể (vd Quotation/AL Bom Item) và các biến pre-resolved.
+
+    Args:
+        source_type: Source type identifier.
+        source_config: JSON string config.
+        doctype: DocType của doc dùng làm context (bỏ trống → resolve doc=None).
+        docname: Tên doc đã lưu (không chấp nhận ``new-`` chưa save).
+        resolved_context_json: JSON dict các biến đã resolve (đưa vào resolved_so_far).
+        data_type: Kiểu cast trên binding test (Float mặc định — khớp test_data_source).
+
+    Returns: cùng shape với test_data_source.
+    """
+    registry = SourceTypeRegistry.get_instance()
+    definition = registry.get(source_type)
+    if not definition:
+        return {"error": f"Unknown source_type: '{source_type}'"}
+
+    try:
+        cfg = json.loads(source_config)
+    except json.JSONDecodeError as e:
+        return {"error": f"Invalid JSON: {e}"}
+
+    errors = registry.validate_source_config(source_type, cfg)
+    if errors:
+        return {"error": "Validation failed", "validation_errors": errors}
+
+    # Load doc context (nếu được cấp)
+    doc = None
+    if doctype and docname:
+        if str(docname).startswith("new-"):
+            return {
+                "success": False,
+                "error": (
+                    f"docname '{docname}' bắt đầu bằng 'new-' (doc chưa lưu). "
+                    "Save doc trước rồi test trên bản đã lưu."
+                ),
+            }
+        try:
+            doc = frappe.get_doc(doctype, docname)
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Không load được doc {doctype}/{docname}: {e}",
+            }
+
+    # Pre-resolved context (resolved_so_far)
+    pre_resolved: Dict[str, Any] = {}
+    if resolved_context_json:
+        try:
+            parsed = json.loads(resolved_context_json)
+            if isinstance(parsed, dict):
+                pre_resolved = parsed
+        except json.JSONDecodeError as e:
+            return {
+                "success": False,
+                "error": f"resolved_context_json không phải JSON object hợp lệ: {e}",
+            }
+
+    result = _execute_source_test(
+        definition, cfg, doc=doc, resolved_so_far=pre_resolved, data_type=data_type
+    )
+    if doc is not None:
+        result["doc_context"] = {
+            "doctype": doctype,
+            "docname": docname,
+            "source_type": source_type,
+        }
+    return result
