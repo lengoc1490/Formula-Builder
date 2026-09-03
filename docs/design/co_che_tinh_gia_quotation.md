@@ -287,7 +287,7 @@ def aluminum_price_composite(binding, doc, resolved_so_far):
 Đăng ký qua `hooks.py::fb_source_types = ["alumglass.fb_handlers.aluminum_price_composite", ...]`. formula_builder tự động phát hiện (`SourceTypeRegistry._discover_from_hooks()`) và cho phép các Formula Variable Binding dùng `source_type="aluminum_price_composite"` — engine gọi lại đúng hàm alumglass đã đăng ký, không cần biết bên trong làm gì.
 → Đây là ranh giới đúng: formula_builder cho "chỗ cắm", alumglass cắm domain logic vào.
 9.4 Điểm nối #4 — `BatchBindingResolver` / `resolve_all_bindings_batch` / `get_live_context`
-`_resolve_fb_context()` (B1.4) gọi `formula\_builder.api.formula_builder.get_live_context(scope_json)` — trả context đầy đủ (biến global + system var) đã resolve qua Formula Variable Binding (doctype của formula_builder, KHÔNG phải `AL Variable Library` của alumglass).
+`_resolve_fb_context()` (B1.4) gọi `formula_builder.api.formula_builder.get_live_context(scope_json)` — trả context đầy đủ (biến global + system var) đã resolve qua Formula Variable Binding (doctype của formula_builder, KHÔNG phải `AL Variable Library` của alumglass).
 `_fetch_composite_prices_via_fb()` (B2) và `_resolve_cost_buckets_via_fb()` (B5) gọi `formula_builder.api.batch_binding_resolver.resolve_all_bindings_batch(bindings, pre_resolved=row_ctx)` — batch-resolve nhiều binding cùng lúc, giảm N+1 query.
 Quan trọng — 2 con đường song song đang tồn tại (có chủ đích, đang trong quá trình di trú):
 	Đường CŨ (alumglass tự viết)	Đường MỚI (formula_builder native)
@@ -376,7 +376,7 @@ Tóm gọn khác biệt: BOM Version snapshot = "công thức lúc đó là gì"
        │ Submit Quotation
        ▼
 ┌───────────────────────────────┐
-│ quotation\_events.on\_submit  │──► tạo ConfigSnapshot (audit trail bất biến)
+│ quotation_events.on_submit    │──► tạo ConfigSnapshot (audit trail bất biến)
 └───────────────────────────────┘
 ```
 ---
