@@ -141,3 +141,34 @@ Builder) → KHÔNG bao giờ `eval()` trần chuỗi đó. Phải qua
 
 Chi tiết thiết kế + audit eval sites: [`docs/security_safe_eval.md`](security_safe_eval.md).
 
+## 9. API admin & scope dùng chung (Phase 1 — 2026-09-03)
+
+Các API whitelisted platform phục vụ FVB Admin UI + app nghiệp vụ (source type vừa đăng
+ký sẽ tự xuất hiện, không cần sửa thêm):
+
+| API | Module | Mục đích |
+| --- | --- | --- |
+| `list_source_types()` | `api/source_type_registry.py` | Dropdown Autocomplete trên FVB — 17 built-in + mọi custom (A1). |
+| `get_source_type_schema(source_type)` | ditto | Render form soạn `source_config` theo `config_schema` (A2). |
+| `validate_binding_source_config(source_type, source_config)` | ditto | Validate config trước khi lưu (đã có từ trước). |
+| `test_data_source(source_type, source_config)` | ditto | Test config với `doc=None` (cũ, backward compatible). |
+| `test_data_source_with_doc(source_type, source_config, doctype, docname, resolved_context_json="{}", data_type="Float")` | ditto | Test config trên doc thật + pre-resolved context (A3). Từ chối docname `new-*` chưa lưu. |
+| `preview_batch_groups(doctype="", applies_to_field="", include_inactive=0)` | `api/batch_binding_resolver.py` | Xem trước nhóm batch + strategy (resolve_batch / resolve_batch_query / execute_individual) trước khi execute (A4). |
+
+Scope semantics (global / doctype / doctype+field) là luật DUY NHẤT đặt tại
+`api/binding_scope.py` (A5):
+
+```python
+from formula_builder.api.binding_scope import (
+    binding_matches_scope,     # 1 binding có áp cho scope (doctype, field)?
+    filter_bindings_for_scope, # filter python-side 1 danh sách
+    get_scope_bindings,        # fetch DB active theo scope + filter
+)
+```
+
+- `get_live_context` và `preview_batch_groups` đều đi qua `get_scope_bindings` → app nghiệp
+  vụ (ví dụ alumglass `_get_pricing_bindings`) NÊN import các hàm này thay vì tự lọc chỉ
+  theo `applies_to_doctype` (tránh lệch preview vs runtime).
+- Chi tiết triển khai + lý do chọn Autocomplete: `docs/design/fvb-single-resolution-layer.md`
+  §10. Điểm phối hợp DEV1: §11 file đó.
+

@@ -446,3 +446,114 @@ trong docs là "known limitation", không phải bug.
 - `_get_pricing_bindings` filter `applies_to_doctype in ["", "Quotation Item",
   "AL Bom Item"]`, KHÔNG đọc `applies_to_field`.
 - D3 skip system var có `source_doctype` ngoài 2 doctype có trong `_LINK_BY_SOURCE_DOCTYPE`.
+
+---
+
+## 10. Phase 1 platform — đã triển khai (2026-09-03)
+
+> Trạng thái: **delivered (code + docs + test)** theo `docs/design/de-xuat-cai-tien-quotation-pricing.md`
+> §3A (A1–A5, platform-side). Scope: repo `formula_builder` thuần — không đụng alumglass
+> (DEV1 đang làm Phase 0/seed FVB ở alumglass song song, §11). **KHÔNG** thay đổi output
+> của bất kỳ source type hiện hữu; binding cũ (13 option Select) đọc bình thường.
+
+### 10.1 A1 — source_type dropdown động
+
+| Quyết định | Giải thích |
+| --- | --- |
+| Đổi `source_type` fieldtype **Select → Autocomplete**, bỏ `options` tĩnh | Autocomplete map `varchar` trong MySQL (cùng cột với Select/Data) → **không cần migrate dữ liệu**, giá trị 13 cũ vẫn đọc được. |
+| JS nạp options từ `list_source_types()` (đã whitelist sẵn) | 17 built-in + mọi custom đăng ký qua hooks `fb_source_types` luôn xuất hiện đúng trạng thái registry. |
+| Giá trị cũ không còn trong registry → vẫn giữ trong dropdown | Không làm mất binding cũ / không force migrate dữ liệu. |
+| **Không** chọn Data + dropdown thủ công | ControlData KHÔNG có `set_data`; phải plumbing Awesomplete tay → rủi ro + bảo trì cao hơn Autocomplete (ControlAutocomplete.extend ControlData, có `set_data([{value,label,description}])` + `format_for_input` tra `_data` theo value). |
+
+Files: `doctype/formula_variable_binding/formula_variable_binding.json`,
+`.../formula_variable_binding.js` (`FB_ADMIN.loadSourceTypeOptions`).
+
+### 10.2 A2 — Form động soạn `source_config`
+
+- FVB form có thêm HTML field **`source_config_editor_html`** ("Source Config Editor") —
+  khi user chọn `source_type`, JS gọi `get_source_type_schema(source_type)` rồi render form
+  theo `config_schema.properties` (checkbox/select/number/text/JSON textarea), ghi ngược về
+  field JSON native `source_config` (source of truth, submit-safe).
+- **required_unless** hiển thị dưới dạng ghi chú "(bắt buộc trừ khi X = Y)" và được tôn trọng
+  khi tính trạng thái "đủ required" — ví dụ `aggregate_from_items.value_field` bỏ trống khi
+  `aggregate = count` là hợp lệ (khớp `_validate_against_schema`).
+- Source type phức tạp (pipeline/conditional/fallback_chain, `args`, `multipliers`...) →
+  prop array/object render thành **JSON textarea inline**; vẫn soạn được thẳng trong
+  `source_config` native nếu muốn (ADR D2 — v1 giữ nguyên).
+- Nút tiện ích (group "Data Source"): **Validate Config**, **Test Source (no doc)**,
+  **Test With Doc…**, **Preview Batch Groups**.
+
+### 10.3 A3 — `test_data_source_with_doc`
+
+- Tách executor dùng chung `_execute_source_test(definition, cfg, doc, resolved_so_far,
+  data_type)`; `test_data_source` (cũ, `doc=None`) gọi nó → **backward compatible**.
+- Whitelisted mới: `test_data_source_with_doc(source_type, source_config, doctype, docname,
+  resolved_context_json="{}", data_type="Float")`.
+  - Load doc thật (từ chối docname `new-*` chưa lưu bằng lỗi rõ ràng).
+  - `resolved_context_json` → pre-resolved `resolved_so_far` (test source phụ thuộc biến
+    đã resolve, ví dụ aggregate `rows_source='resolved'`).
+  - Trả shape giống `test_data_source`; khi có doc → kèm `doc_context`.
+
+### 10.4 A4 — `preview_batch_groups`
+
+- `BatchBindingResolver.preview_groups(bindings)` — mô phỏng pipeline thật của
+  `resolve_all_batch` nhưng **không execute handler**: `_split_batchable` →
+  `_group_by_fingerprint` → mỗi nhóm phân loại strategy đúng thứ tự ưu tiên của
+  `_execute_one_group` (`resolve_batch` / `resolve_batch_query` / `execute_individual`).
+- Whitelisted: `preview_batch_groups(doctype, applies_to_field, include_inactive)` — scope
+  lấy qua `binding_scope.get_scope_bindings` (cùng semantics `get_live_context`).
+- Output: `{scope, summary:{total_bindings, total_groups, batch_groups,
+  individual_bindings, estimated_queries, potential_query_reduction}, groups:[{...}],
+  individual_bindings:[{variable_name, source_type, reason}]}`. Nhóm rơi vào
+  `execute_individual` và binding non-batchable được liệt kê đầy đủ → FVB admin thấy N+1
+  trước khi chạy thật.
+
+### 10.5 A5 — Scope semantics tập trung (`binding_scope`)
+
+- New module `api/binding_scope.py`:
+  - `binding_matches_scope(binding, doctype, field)` — luật scope DUY NHẤT.
+  - `filter_bindings_for_scope(bindings, doctype, field)` — filter python-side.
+  - `get_scope_bindings(doctype, field, include_inactive, fields, order_by)` — fetch + filter
+    DB, dùng chung cho `get_live_context` và `preview_batch_groups`.
+- `get_live_context` refactor gọn về `get_scope_bindings(...)` — **hành vi filter giữ
+  nguyên 100%** (global / doctype / doctype+field; `applies_to_doctype in ["", doctype]`
+  prefilter khi có doctype; order `resolve_priority asc`).
+- Vì sao: `_get_pricing_bindings` (alumglass) filter chỉ theo doctype, bỏ qua
+  `applies_to_field` → preview scope lệch runtime. App nghiệp vụ giờ import 3 hàm này để
+  dùng chung 1 luật (xem §11).
+
+### 10.6 Test & gate (Phase 1)
+
+- Test file mới: `formula_builder/tests/test_platform_phase1.py` — **pure-Python, không cần
+  site/DB**:
+  `python -m unittest formula_builder.tests.test_platform_phase1` (23 tests pass).
+  Coverage: registry metadata/A1, required_unless/A2, test_data_source doc=None/A3,
+  preview_groups grouping+strategy/A4, binding_scope semantics/A5.
+- Smoke no-site: import + `test_data_source`/`validate_binding_source_config` trên
+  `constant`, `session_variable`, `aggregate_from_items`; import đủ module; py_compile cả 4
+  file py; `node --check` JS; `json.tool` doctype JSON.
+- Chưa verify được trên site (formula_builder chưa cài ở site nào; **không migrate** theo
+  job scope) → mọi bài DB-driven chờ khi app được cài/sync trên site dev.
+
+---
+
+## 11. Giao diện phối hợp DEV1 (alumglass Phase 0/seed — song song)
+
+DEV2 chỉ làm platform (repo formula_builder). Các điểm DEV1 cần nối khi làm alumglass:
+
+1. **`_get_pricing_bindings` phải tôn trọng `applies_to_field`.** Thay vì tự lọc theo
+   `applies_to_doctype in ["", "Quotation Item", "AL Bom Item"]`, import dùng chung:
+   `from formula_builder.api.binding_scope import get_scope_bindings, filter_bindings_for_scope,
+   binding_matches_scope` — giữ đúng field semantics như `get_live_context`. KHÔNG duplicate
+   logic filter ở app.
+2. **Scope preview batch** dùng chung `formula_builder.api.batch_binding_resolver.preview_batch_groups`
+   (đã trả theo scope semantics trên) → dev BOM item/Quotation nhìn trước được nhóm nào N+1.
+3. **Test config có doc** của app dùng `test_data_source_with_doc` (không tự đẻ API tương tự).
+4. Import order (nếu app test trong env không có site): phải `import
+   formula_builder.api.data_source_registry` trước khi đọc central registry (module-level
+   `_register_all_to_central_registry()` nạp 17 built-in); import `source_type_registry`
+   đơn lẻ → registry rỗng.
+
+Chưa thấy việc cần đụng code alumglass ở phía platform; nếu DEV1 gặp thiếu contract nào
+trong 3 hàm scope → báo lại Elon để bổ sung tại `binding_scope.py` (không sửa ở app).
+
