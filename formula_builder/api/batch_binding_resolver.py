@@ -421,6 +421,107 @@ class BatchBindingResolver:
 
         return groups
 
+    # ── Preview logic (A4 — Phase 1) ────────────────────────────────────
+
+    def _strategy_for(self, source_type: str) -> str:
+        """Dự đoán strategy mà `_execute_one_group` sẽ dùng cho nhóm.
+
+        Đúng thứ tự ưu tiên của execution thật:
+          - handler có `resolve_batch`  → "resolve_batch"
+          - handler có `resolve_batch_query` → "resolve_batch_query"
+          - còn lại                      → "execute_individual" (N+1 fallback)
+        """
+        if _get_batch_handler(source_type):
+            return "resolve_batch"
+        handler = get_handler(source_type)
+        if handler and getattr(handler, "resolve_batch_query", None):
+            return "resolve_batch_query"
+        return "execute_individual"
+
+    def preview_groups(self, bindings: List[dict]) -> Dict[str, Any]:
+        """Xem trước grouping batch cho danh sách binding — KHÔNG execute handler.
+
+        Mô phỏng đúng pipeline của `resolve_all_batch`:
+          1. `_split_batchable` → (batchable, non_batchable)
+          2. batchable → `_group_by_fingerprint` → mỗi nhóm 1 strategy
+             (giống `_execute_one_group`: resolve_batch / resolve_batch_query /
+             execute_individual — nhóm rơi vào execute_individual = N+1).
+          3. non-batchable → từng binding chạy qua `resolve_bindings_with_deps`
+             (mỗi binding 1 handler call).
+
+        Args:
+            bindings: danh sách binding dict (đã khớp scope).
+
+        Returns:
+            Dict: summary + groups + individual_bindings. Định dạng khớp contract
+            JS dialog preview trong FVB form (A4).
+        """
+        batchable, non_batchable = self._split_batchable(bindings)
+
+        groups: List[Dict[str, Any]] = []
+        individual_vars: List[Dict[str, Any]] = []
+        for (source_type, fp), group_bindings in self._group_by_fingerprint(batchable).items():
+            strategy = self._strategy_for(source_type)
+            # Nhóm batchable nhưng không có resolve_batch/resolve_batch_query
+            # → execution thật rơi xuống `_execute_individual` (N+1).
+            if strategy == "execute_individual":
+                for b in group_bindings:
+                    individual_vars.append({
+                        "variable_name": b.get("variable_name"),
+                        "source_type": source_type,
+                        "reason": "nhóm batchable nhưng handler không có resolve_batch "
+                                  "→ rơi vào _execute_individual (N+1)",
+                    })
+            groups.append({
+                "source_type": source_type,
+                "fingerprint": fp,
+                "strategy": strategy,
+                "binding_count": len(group_bindings),
+                "variables": [b.get("variable_name") for b in group_bindings],
+                "explicit_batch_group": bool(group_bindings[0].get("batch_group")),
+            })
+
+        # Non-batchable: từng binding resolve độc lập qua deps resolver.
+        for b in non_batchable:
+            individual_vars.append({
+                "variable_name": b.get("variable_name"),
+                "source_type": b.get("source_type", ""),
+                "reason": "handler không batchable → resolve_bindings_with_deps từng binding",
+            })
+
+        # Ước lượng số query (gần đúng):
+        #   nhóm batch       → 1 query
+        #   nhóm individual  → 1 query / binding
+        #   non-batchable    → 1 handler call / binding
+        batch_group_count = 0
+        estimated_queries = 0
+        for g in groups:
+            if g["strategy"] == "execute_individual":
+                estimated_queries += g["binding_count"]
+            else:
+                batch_group_count += 1
+                estimated_queries += 1
+        estimated_queries += len(non_batchable)
+
+        total_bindings = len(bindings)
+        summary = {
+            "total_bindings": total_bindings,
+            "batch_groups": batch_group_count,
+            "total_groups": len(groups),
+            "individual_bindings": len(individual_vars),
+            "estimated_queries": estimated_queries,
+            # Càng xa 1:1 thì batch càng đáng giá (≈ 1/(total) giảm được nếu 100% batchable)
+            "potential_query_reduction": round(
+                (1 - (estimated_queries / max(total_bindings, 1))) * 100, 1
+            ),
+        }
+
+        return {
+            "summary": summary,
+            "groups": groups,
+            "individual_bindings": individual_vars,
+        }
+
     # ── Execute logic ───────────────────────────────────────────────────
 
     def _execute_one_group(
@@ -549,3 +650,59 @@ def resolve_all_bindings_batch(
     """
     resolver = _get_request_resolver()
     return resolver.resolve_all_batch(bindings, doc, pre_resolved)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# A4 — Preview batch groups (Phase 1 — platform)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@frappe.whitelist()
+def preview_batch_groups(
+    doctype: str = "",
+    applies_to_field: str = "",
+    include_inactive: int = 0,
+) -> Dict[str, Any]:
+    """Xem trước grouping batch của binding active theo scope — KHÔNG execute.
+
+    Scope binding lấy theo đúng luật filter scope dùng chung
+    (`binding_scope.get_scope_bindings` — cùng semantics như `get_live_context`):
+      global + khớp doctype + khớp doctype/field.
+
+    Với mỗi binding báo strategy dự kiến như `resolve_all_batch` sẽ chạy:
+      - resolve_batch        → 1 batch query cho cả nhóm
+      - resolve_batch_query  → 1 pre-query + distribute
+      - execute_individual   → N+1 (từng binding gọi handler riêng)
+
+    Args:
+        doctype: doctype scope ("" = global + mọi doctype-khớp).
+        applies_to_field: fieldname scope ("" = không lọc theo field).
+        include_inactive: 1 → kể cả binding is_active=0.
+
+    Returns:
+        Dict theo contract JS (summary + groups + individual_bindings).
+        Khi lỗi trả về {"error": <message>}.
+    """
+    from formula_builder.api.binding_scope import BINDING_FIELDS, get_scope_bindings
+
+    try:
+        bindings = get_scope_bindings(
+            doctype=doctype or "",
+            field=applies_to_field or "",
+            include_inactive=bool(int(include_inactive or 0)),
+            fields=list(BINDING_FIELDS) + ["batch_group", "is_active"],
+        )
+    except Exception as e:
+        frappe.log_error(
+            title="preview_batch_groups: fetch scope bindings failed",
+            message=str(e),
+        )
+        return {"error": f"Không đọc được scope bindings: {e}"}
+
+    # Preview dùng resolver mới (không sờ tới request-cache / singleton).
+    preview = BatchBindingResolver().preview_groups(bindings)
+    preview["scope"] = {
+        "doctype": doctype or "",
+        "applies_to_field": applies_to_field or "",
+        "include_inactive": bool(int(include_inactive or 0)),
+    }
+    return preview
