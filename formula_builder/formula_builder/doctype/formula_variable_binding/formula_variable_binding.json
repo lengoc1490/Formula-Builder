@@ -12,6 +12,7 @@
   "resolve_priority",
   "source_config",
   "batch_group",
+  "source_config_editor_html",
   "column_break_kres",
   "applies_to_doctype",
   "applies_to_field",
@@ -38,11 +39,11 @@
    "label": "Label"
   },
   {
+   "description": "Loại nguồn dữ liệu. Options nạp động từ SourceTypeRegistry (API list_source_types) — 17 built-in + custom type đăng ký từ app khác (hooks fb_source_types). Vẫn chấp nhận giá trị cũ lưu dạng chuỗi.",
    "fieldname": "source_type",
-   "fieldtype": "Select",
+   "fieldtype": "Autocomplete",
    "in_standard_filter": 1,
-   "label": "Source Type",
-   "options": "\nconstant\nlinked_doctype_field\nwhole_doctype\nchild_table_aggregate\nglobal_default\nsession_variable\ndoctype_query\ncustom_function\ndynamic_link\ncomputed\npipeline\nconditional\nfallback_chain"
+   "label": "Source Type"
   },
   {
    "default": "100",
@@ -60,6 +61,12 @@
    "fieldtype": "Data",
    "label": "Batch Group",
    "description": "Bindings with the same batch_group value will be grouped into a single batch query. Leave blank to use the handler's default fingerprint."
+  },
+  {
+   "fieldname": "source_config_editor_html",
+   "fieldtype": "HTML",
+   "label": "Source Config Editor",
+   "description": "Form động soạn source_config theo config_schema của source_type (JS). Với source type phức tạp (pipeline/conditional/fallback_chain) dùng editor JSON trợ giúp ngay bên dưới."
   },
   {
    "fieldname": "column_break_kres",
@@ -107,7 +114,7 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-07-25 12:00:00.000000",
+ "modified": "2026-09-03 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Formula Builder",
  "name": "Formula Variable Binding",
