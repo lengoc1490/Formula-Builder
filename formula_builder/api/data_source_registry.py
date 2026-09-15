@@ -285,8 +285,19 @@ def _handle_linked_doctype_field(binding: dict, doc, resolved_so_far: dict) -> A
     target_field = cfg.get("target_field", "")
     fallback = cfg.get("fallback")
 
-    if not doc or not link_field or not target_field:
+    if not doc or not target_field:
         return fallback
+
+    # MỞ RỘNG: link_field bỏ trống + có target_doctype → tự dò field Link
+    # trên doc.doctype trỏ tới target_doctype (chiều ngược auto-discovery đã
+    # có). Generic, không đặc thù ngành — tổng quát hoá alumglass.system_
+    # variable_resolver.resolve_source_link_fields.
+    if not link_field:
+        if not target_doctype:
+            return fallback
+        link_field = _auto_discover_link_field(doc.doctype, target_doctype)
+        if not link_field:
+            return fallback
 
     linked_name = doc.get(link_field)
     if not linked_name:
@@ -305,6 +316,17 @@ def _handle_linked_doctype_field(binding: dict, doc, resolved_so_far: dict) -> A
             f"DataSource: linked_doctype_field ({binding.get('variable_name')})",
         )
         return fallback
+
+
+def _auto_discover_link_field(source_doctype, target_doctype):
+    """Fieldname của field Link ĐẦU TIÊN (theo thứ tự khai báo) trên
+    source_doctype trỏ tới target_doctype. None nếu không có field khớp.
+    frappe.get_meta đã tự cache — không cần cache thêm ở đây."""
+    meta = frappe.get_meta(source_doctype)
+    for f in meta.get("fields", []):
+        if f.fieldtype == "Link" and f.options == target_doctype:
+            return f.fieldname
+    return None
 
 
 def _resolve_linked_doctype_field_batch(
@@ -327,9 +349,20 @@ def _resolve_linked_doctype_field_batch(
         target_doctype = cfg.get("target_doctype", "")
         target_field = cfg.get("target_field", "")
 
-        if not link_field or not target_field:
+        if not target_field:
             results[b["variable_name"]] = cfg.get("fallback") or b.get("default_value")
             continue
+
+        # MỞ RỘNG: cùng nhánh auto-discover như bản đơn (_handle_linked_
+        # doctype_field), giữ nhất quán hành vi giữa 2 đường resolve.
+        if not link_field:
+            if not target_doctype:
+                results[b["variable_name"]] = cfg.get("fallback") or b.get("default_value")
+                continue
+            link_field = _auto_discover_link_field(doc.doctype, target_doctype)
+            if not link_field:
+                results[b["variable_name"]] = cfg.get("fallback") or b.get("default_value")
+                continue
 
         linked_name = doc.get(link_field)
         if not linked_name:
@@ -2547,6 +2580,178 @@ def _resolve_composite_key_lookup_batch(bindings, doc, resolved_so_far):
 
 
 _handle_composite_key_lookup.resolve_batch = _resolve_composite_key_lookup_batch
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# range_lookup — tra giá trị theo khoảng số (from-to → result)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _fetch_range_rows(cfg):
+    doctype = cfg.get("doctype", "")
+    value_field = cfg.get("value_field", "")
+    from_field = cfg.get("range_from_field", "")
+    to_field = cfg.get("range_to_field", "")
+    if not (doctype and value_field and from_field and to_field):
+        return []
+    fields = ["name", value_field, from_field, to_field]
+    filters = cfg.get("filters") or []
+    try:
+        return frappe.get_all(doctype, filters=filters or None, fields=fields) or []
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), f"DataSource: range_lookup ({doctype})")
+        return []
+
+
+def _match_range_value(rows, cfg, input_val, default_value, data_type):
+    from_field = cfg.get("range_from_field", "")
+    to_field = cfg.get("range_to_field", "")
+    value_field = cfg.get("value_field", "")
+    try:
+        val = float(input_val)
+    except (TypeError, ValueError):
+        return default_value
+    for r in rows:
+        try:
+            lo = float(r.get(from_field))
+            hi = float(r.get(to_field))
+        except (TypeError, ValueError):
+            continue
+        if lo <= val <= hi:
+            return _cast(r.get(value_field), data_type)
+    return default_value
+
+
+@register_source(
+    "range_lookup",
+    label="Range / Threshold Lookup",
+    description=(
+        "Tra giá trị từ bảng khoảng số (from-to → result), dùng chung cho "
+        "mọi ngành cần phân bậc theo ngưỡng số. Tổng quát hoá AL Dynamic Item "
+        "Rule (THRESHOLD mode) — data vẫn nằm ở doctype ngành, chỉ engine dùng chung."
+    ),
+    config_schema={
+        "type": "object",
+        "required": ["doctype", "value_field", "input_value", "range_from_field", "range_to_field"],
+        "properties": {
+            "doctype": {"type": "string"},
+            "value_field": {"type": "string"},
+            "input_value": {"type": "string", "description": "Hỗ trợ template {{row.x}}/{{doc.x}}/{{resolved.x}}"},
+            "range_from_field": {"type": "string", "description": "Cận dưới (inclusive)"},
+            "range_to_field": {"type": "string", "description": "Cận trên (inclusive)"},
+            "filters": {"type": "array"},
+            "default_value": {"type": ["number", "string"]},
+        },
+    },
+    app="formula_builder",
+    batchable=True,
+    fingerprint_fn=lambda cfg: "range_lookup:" + cfg.get("doctype", "") + "|" + json.dumps(cfg.get("filters") or [], sort_keys=True),
+    supports_transform=True,
+    supports_cache=True,
+    default_cache_ttl=300,
+)
+def _handle_range_lookup(binding, doc, resolved_so_far):
+    cfg = json.loads(binding.get("source_config") or "{}")
+    default_value = cfg.get("default_value", binding.get("default_value"))
+    data_type = binding.get("data_type") or cfg.get("type", "Float")
+    row = _binding_row(binding, resolved_so_far)
+    input_val = _resolve_template_val(cfg.get("input_value"), doc, resolved_so_far, row)
+    if input_val is None or input_val == "":
+        return default_value
+    rows = _fetch_range_rows(cfg)
+    if not rows:
+        return default_value
+    return _match_range_value(rows, cfg, input_val, default_value, data_type)
+
+
+def _resolve_range_lookup_batch(bindings, doc, resolved_so_far):
+    """Fetch rows 1 lần/group (cùng doctype+filters — xem fingerprint_fn),
+    resolve từng binding. CHỈ an toàn khi các binding trong cùng group thật
+    sự cùng (doctype, filters) — nếu mở rộng logic gom nhóm sau này, giữ
+    đúng ràng buộc này (đọc cfg0 của binding ĐẦU rồi áp cho cả nhóm)."""
+    results = {}
+    if not bindings:
+        return results
+    cfg0 = json.loads(bindings[0].get("source_config") or "{}")
+    rows = _fetch_range_rows(cfg0)
+    for b in bindings:
+        cfg = json.loads(b.get("source_config") or "{}")
+        default_value = cfg.get("default_value", b.get("default_value"))
+        data_type = b.get("data_type") or cfg.get("type", "Float")
+        row = _binding_row(b, resolved_so_far)
+        input_val = _resolve_template_val(cfg.get("input_value"), doc, resolved_so_far, row)
+        if input_val is None or input_val == "" or not rows:
+            results[b["variable_name"]] = default_value
+            continue
+        results[b["variable_name"]] = _match_range_value(rows, cfg, input_val, default_value, data_type)
+    return results
+
+
+_handle_range_lookup.resolve_batch = _resolve_range_lookup_batch
+
+
+def _fetch_child_table_row(cfg, doc):
+    """Trả row (dict) khớp key_value trong child table, hoặc None."""
+    child_field = cfg.get("child_table_field", "")
+    key_field = cfg.get("key_field", "")
+    if not (doc and child_field and key_field):
+        return None
+    key_value = cfg.get("_resolved_key_value")
+    filter_active_field = cfg.get("filter_active_field")
+    for row in (doc.get(child_field) or []):
+        if row.get(key_field) != key_value:
+            continue
+        if filter_active_field and not row.get(filter_active_field):
+            continue
+        return row
+    return None
+
+
+@register_source(
+    "child_table_lookup",
+    label="Child Table Row Lookup",
+    description=(
+        "Tra ĐÚNG 1 dòng trong child table theo key, trả 1 field khác — khác "
+        "child_table_aggregate (chỉ aggregate). Dùng cho pattern 'bảng "
+        "override cấu hình theo key' nhúng trong doc cha."
+    ),
+    config_schema={
+        "type": "object",
+        "required": ["child_table_field", "key_field", "key_value", "value_field"],
+        "properties": {
+            "child_table_field": {"type": "string"},
+            "key_field": {"type": "string"},
+            "key_value": {"type": "string", "description": "Hỗ trợ template {{binding.variable_name}}/{{row.x}}/{{doc.x}}"},
+            "value_field": {"type": "string"},
+            "filter_active_field": {"type": "string"},
+            "default_value": {"type": ["number", "string"]},
+        },
+    },
+    app="formula_builder",
+    batchable=True,
+    fingerprint_fn=lambda cfg: "child_table_lookup:" + cfg.get("child_table_field", ""),
+    supports_cache=False,   # đọc trực tiếp từ doc đã load sẵn — không có DB round-trip để cache
+)
+def _handle_child_table_lookup(binding, doc, resolved_so_far):
+    cfg = json.loads(binding.get("source_config") or "{}")
+    default_value = cfg.get("default_value", binding.get("default_value"))
+    if not doc:
+        return default_value
+    row = _binding_row(binding, resolved_so_far)
+    key_value = _resolve_template_val(cfg.get("key_value"), doc, resolved_so_far, row)
+    if key_value is None or key_value == "":
+        return default_value
+    cfg = dict(cfg, _resolved_key_value=key_value)
+    match = _fetch_child_table_row(cfg, doc)
+    if match is None:
+        return default_value
+    return _cast(match.get(cfg.get("value_field")), binding.get("data_type") or "Data")
+
+
+def _resolve_child_table_lookup_batch(bindings, doc, resolved_so_far):
+    return {b["variable_name"]: _handle_child_table_lookup(b, doc, resolved_so_far) for b in bindings}
+
+
+_handle_child_table_lookup.resolve_batch = _resolve_child_table_lookup_batch
 
 
 # ───────────────────────────────────────────────────────────────────────────
