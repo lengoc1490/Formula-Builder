@@ -1761,7 +1761,7 @@ def _fb_row_get(obj, key):
     return getattr(obj, key, None)
 
 
-def _resolve_template_val(val, doc=None, resolved_so_far=None, row=None):
+def _resolve_template_val(val, doc=None, resolved_so_far=None, row=None, binding=None):
     """Resolve template strings referencing runtime context.
 
     Supported syntax (double-brace + FB legacy single-brace):
@@ -1769,6 +1769,14 @@ def _resolve_template_val(val, doc=None, resolved_so_far=None, row=None):
       - {{doc.field}}   / {doc.field}       → value from the parent document
       - {{resolved.x}}  / {resolved.x}      → value from already-resolved variables
       - {{inputs.x}}    / {inputs.x}        → alias of resolved
+      - {{binding.x}}   / {binding.x}       → value from the current binding dict
+        itself (vd {{binding.variable_name}} — biến binding đang resolve).
+        2026-09 fix: scope này ĐÃ được document ở config_schema của
+        child_table_lookup từ trước nhưng chưa từng implement — mọi
+        template dùng {{binding.x}} âm thầm resolve ra None (rơi về
+        default_value) thay vì lỗi rõ ràng. Chỉ truyền khi caller có
+        `binding` (xem _handle_child_table_lookup); các handler khác không
+        đổi hành vi (binding=None mặc định, giữ nguyên 100% behavior cũ).
 
     If the whole string is one template, the raw value is returned (type preserved).
     If templates are embedded in literal text, they are replaced as strings.
@@ -1788,6 +1796,8 @@ def _resolve_template_val(val, doc=None, resolved_so_far=None, row=None):
             return resolved_so_far.get(key)
         if scope == "doc":
             return _fb_row_get(doc, key)
+        if scope == "binding":
+            return _fb_row_get(binding, key)
         return None
 
     full = re.fullmatch(
@@ -2737,7 +2747,8 @@ def _handle_child_table_lookup(binding, doc, resolved_so_far):
     if not doc:
         return default_value
     row = _binding_row(binding, resolved_so_far)
-    key_value = _resolve_template_val(cfg.get("key_value"), doc, resolved_so_far, row)
+    key_value = _resolve_template_val(
+        cfg.get("key_value"), doc, resolved_so_far, row, binding=binding)
     if key_value is None or key_value == "":
         return default_value
     cfg = dict(cfg, _resolved_key_value=key_value)
