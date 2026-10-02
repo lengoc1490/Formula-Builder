@@ -305,7 +305,7 @@ def get_live_context(scope_context_json):
         doc = None
         if ctx.current_docname and not ctx.current_docname.startswith("new-"):
             try:
-                doc = frappe.get_doc(doctype, ctx.current_docname)
+                doc = frappe.get_cached_doc(doctype, ctx.current_docname)
             except Exception:
                 pass
 

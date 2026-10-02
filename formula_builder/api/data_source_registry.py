@@ -277,7 +277,16 @@ def _handle_constant(binding: dict, doc, resolved_so_far: dict) -> Any:
 
 
 @register_source("linked_doctype_field")
-@batchable(fingerprint_fn=lambda cfg: "linked:" + cfg.get("target_doctype", "") + ":" + cfg.get("target_field", ""))
+# 2026-10 (fix N+1 thật): fingerprint CŨ gồm cả target_field → mỗi field khác
+# nhau tạo 1 fingerprint riêng → BatchBindingResolver._group_by_fingerprint
+# tách chúng thành CÁC NHÓM RIÊNG trước khi resolve_batch() từng nhóm thấy —
+# tức N biến trỏ N field khác nhau trên CÙNG 1 doctype vẫn ra N nhóm = N query,
+# dù đã gắn @batchable (xem data_source_registry.py:377 bản cũ + đối chiếu
+# _group_by_fingerprint ở batch_binding_resolver.py). Bỏ target_field khỏi
+# fingerprint → mọi binding cùng target_doctype được gom vào 1 nhóm, để
+# _resolve_linked_doctype_field_batch tự regroup theo record thật (dt,
+# linked_name) và gộp NHIỀU field trong 1 get_value (xem bên dưới).
+@batchable(fingerprint_fn=lambda cfg: "linked:" + cfg.get("target_doctype", ""))
 def _handle_linked_doctype_field(binding: dict, doc, resolved_so_far: dict) -> Any:
     cfg = json.loads(binding.get("source_config") or "{}")
     link_field = cfg.get("link_field", "")
@@ -334,73 +343,82 @@ def _resolve_linked_doctype_field_batch(
 ) -> Dict[str, Any]:
     """Batch resolve nhiều linked_doctype_field bindings.
 
-    Gom theo (doctype, target_field) → 1 query WHERE name IN (...).
+    2026-10 (fix N+1 thật — trước đây gom theo (dt, target_field, linked_name)
+    nên N field khác nhau trên CÙNG 1 record vẫn ra N query, y hệt đường
+    không-batch). Nay gom theo (dt, linked_name) — tức "cùng 1 bản ghi đích"
+    — rồi gộp TOÀN BỘ target_field cần cho nhóm đó vào 1 lệnh
+    frappe.db.get_value(dt, linked_name, [field1, field2, ...], as_dict=True),
+    1 query cho dù nhóm cần bao nhiêu field. Đây là trường hợp phổ biến nhất
+    trong thực tế (vd nhiều system variable OFFSET_FRAME/OFFSET_GLASS/...
+    cùng trỏ field khác nhau trên CÙNG 1 record AL Profile System).
     """
     if not bindings or not doc:
         return {}
 
     results: Dict[str, Any] = {}
 
-    # Group by (target_doctype, target_field)
-    groups: Dict[Tuple[str, str], List[dict]] = defaultdict(list)
+    # Group theo (target_doctype, linked_name) — "cùng 1 bản ghi đích" —
+    # mỗi entry trong nhóm giữ lại (binding, target_field, fallback) để
+    # phân phối giá trị sau khi query xong.
+    groups: Dict[Tuple[str, str], List[Tuple[dict, str, Any]]] = defaultdict(list)
     for b in bindings:
         cfg = json.loads(b.get("source_config", "{}"))
         link_field = cfg.get("link_field", "")
         target_doctype = cfg.get("target_doctype", "")
         target_field = cfg.get("target_field", "")
+        fallback = cfg.get("fallback") or b.get("default_value")
 
         if not target_field:
-            results[b["variable_name"]] = cfg.get("fallback") or b.get("default_value")
+            results[b["variable_name"]] = fallback
             continue
 
         # MỞ RỘNG: cùng nhánh auto-discover như bản đơn (_handle_linked_
         # doctype_field), giữ nhất quán hành vi giữa 2 đường resolve.
         if not link_field:
             if not target_doctype:
-                results[b["variable_name"]] = cfg.get("fallback") or b.get("default_value")
+                results[b["variable_name"]] = fallback
                 continue
             link_field = _auto_discover_link_field(doc.doctype, target_doctype)
             if not link_field:
-                results[b["variable_name"]] = cfg.get("fallback") or b.get("default_value")
+                results[b["variable_name"]] = fallback
                 continue
 
         linked_name = doc.get(link_field)
         if not linked_name:
-            results[b["variable_name"]] = cfg.get("fallback") or b.get("default_value")
+            results[b["variable_name"]] = fallback
             continue
 
         dt = target_doctype or frappe.get_meta(doc.doctype).get_field(link_field).options
         if not dt:
-            results[b["variable_name"]] = cfg.get("fallback") or b.get("default_value")
+            results[b["variable_name"]] = fallback
             continue
 
-        groups[(dt, target_field, linked_name)].append(b)
+        groups[(dt, linked_name)].append((b, target_field, fallback))
 
-    # Batch execute each group
-    for (dt, target_field, linked_name), group in groups.items():
+    # Batch execute: 1 query/record, lấy TẤT CẢ field cần trong nhóm đó.
+    for (dt, linked_name), entries in groups.items():
+        fields_needed = sorted({target_field for _, target_field, _ in entries})
         try:
-            # 1 query lấy tất cả fields từ linked doctype
-            full_doc = frappe.db.get_value(dt, linked_name, target_field)
-            value = full_doc if full_doc is not None else None
-            for b in group:
-                results[b["variable_name"]] = (
-                    value
-                    if value is not None
-                    else b.get("default_value")
-                )
+            if len(fields_needed) == 1:
+                # 1 field duy nhất — get_value trả thẳng scalar, không cần as_dict.
+                val = frappe.db.get_value(dt, linked_name, fields_needed[0])
+                row = {fields_needed[0]: val}
+            else:
+                row = frappe.db.get_value(dt, linked_name, fields_needed, as_dict=True) or {}
+            for b, target_field, fallback in entries:
+                val = row.get(target_field)
+                results[b["variable_name"]] = val if val is not None else fallback
         except Exception as e:
             frappe.log_error(
-                f"Batch linked_doctype_field failed ({dt}/{target_field}): {e}",
+                f"Batch linked_doctype_field failed ({dt}/{linked_name}): {e}",
                 "DataSource Registry",
             )
-            for b in group:
+            for b, target_field, fallback in entries:
                 try:
                     val = _handle_linked_doctype_field(b, doc, resolved_so_far)
-                    results[b["variable_name"]] = (
-                        val if val is not None else b.get("default_value")
-                    )
+                    results[b["variable_name"]] = val if val is not None else fallback
                 except Exception:
-                    results[b["variable_name"]] = b.get("default_value")
+                    results[b["variable_name"]] = fallback
 
     return results
 
