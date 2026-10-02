@@ -276,17 +276,36 @@ def _handle_constant(binding: dict, doc, resolved_so_far: dict) -> Any:
     return _cast(cfg.get("value"), binding.get("data_type") or cfg.get("type", "Float"))
 
 
+def _fingerprint_linked_doctype(cfg: dict) -> str:
+    """Fingerprint gom nhóm cho source_type `linked_doctype_field`.
+
+    CHỈ gồm `target_doctype`. CỐ Ý KHÔNG gồm `target_field`: nếu gồm, N biến
+    trỏ N field khác nhau trên CÙNG một bản ghi sẽ rơi vào N nhóm riêng →
+    `BatchBindingResolver._group_by_fingerprint` gọi `resolve_batch` N lần →
+    N query, mất hết tác dụng gộp. Bỏ `target_field` ra thì mọi binding cùng
+    `target_doctype` vào 1 nhóm, và `_resolve_linked_doctype_field_batch` tự
+    regroup lại theo (doctype, bản ghi đích) rồi gộp NHIỀU field vào 1 lệnh
+    `frappe.db.get_value`.
+
+    Hàm này phải được dùng ở CẢ HAI chỗ đăng ký `linked_doctype_field`
+    (decorator bên dưới + `_register_all_to_central_registry`); lệch một chỗ
+    là `SourceTypeRegistry.register()` gán đè `handler.fingerprint_fn` và bản
+    vá im lặng mất tác dụng.
+    """
+    return "linked:" + (cfg.get("target_doctype") or "")
+
+
 @register_source("linked_doctype_field")
 # 2026-10 (fix N+1 thật): fingerprint CŨ gồm cả target_field → mỗi field khác
 # nhau tạo 1 fingerprint riêng → BatchBindingResolver._group_by_fingerprint
 # tách chúng thành CÁC NHÓM RIÊNG trước khi resolve_batch() từng nhóm thấy —
 # tức N biến trỏ N field khác nhau trên CÙNG 1 doctype vẫn ra N nhóm = N query,
-# dù đã gắn @batchable (xem data_source_registry.py:377 bản cũ + đối chiếu
-# _group_by_fingerprint ở batch_binding_resolver.py). Bỏ target_field khỏi
-# fingerprint → mọi binding cùng target_doctype được gom vào 1 nhóm, để
-# _resolve_linked_doctype_field_batch tự regroup theo record thật (dt,
-# linked_name) và gộp NHIỀU field trong 1 get_value (xem bên dưới).
-@batchable(fingerprint_fn=lambda cfg: "linked:" + cfg.get("target_doctype", ""))
+# dù đã gắn @batchable (xem _group_by_fingerprint ở
+# batch_binding_resolver.py). Dùng _fingerprint_linked_doctype (CHỈ
+# target_doctype, xem docstring) → mọi binding cùng target_doctype gom vào 1
+# nhóm, để _resolve_linked_doctype_field_batch tự regroup theo record thật
+# (dt, linked_name) và gộp NHIỀU field trong 1 get_value (xem bên dưới).
+@batchable(fingerprint_fn=_fingerprint_linked_doctype)
 def _handle_linked_doctype_field(binding: dict, doc, resolved_so_far: dict) -> Any:
     cfg = json.loads(binding.get("source_config") or "{}")
     link_field = cfg.get("link_field", "")
@@ -1473,7 +1492,7 @@ def _register_all_to_central_registry():
             },
         },
         batchable=True,
-        fingerprint_fn=lambda cfg: "linked:" + cfg.get("target_doctype", "") + ":" + cfg.get("target_field", ""),
+        fingerprint_fn=_fingerprint_linked_doctype,
         supports_transform=True,
         supports_cache=True,
         default_cache_ttl=300,

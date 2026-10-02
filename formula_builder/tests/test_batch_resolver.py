@@ -1,6 +1,9 @@
 """Tests for api/batch_binding_resolver.py — batch resolve, grouping, fallback."""
 
 import json
+from unittest import mock
+
+import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from formula_builder.api.batch_binding_resolver import (
@@ -15,6 +18,7 @@ from formula_builder.api.data_source_registry import (
     is_batchable,
     register_source,
     get_handler,
+    _resolve_linked_doctype_field_batch,
 )
 
 
@@ -229,3 +233,111 @@ class TestBatchableDecorator(FrappeTestCase):
 
         self.assertTrue(getattr(_handler, 'batchable', False))
         # No fingerprint_fn set explicitly → use default grouping by source_type
+
+
+# ── Chống tái phát: gom nhóm `linked_doctype_field` ───────────────────────
+
+class _FakeLinkedDoc:
+    """Doc giả tối thiểu cho `_resolve_linked_doctype_field_batch`.
+
+    Chỉ cần đúng 2 thứ mà hàm đó dùng: `.doctype` (nhánh auto-discover link
+    field) và `.get(fieldname)` (đọc link_field → tên bản ghi đích).
+    """
+
+    def __init__(self, doctype, values):
+        self.doctype = doctype
+        self._values = values
+
+    def get(self, fieldname, default=None):
+        return self._values.get(fieldname, default)
+
+
+class TestLinkedDoctypeFieldBatching(FrappeTestCase):
+    """Chống tái phát lỗi 2026-10: fingerprint của `linked_doctype_field` bị
+    đăng ký ĐÈ bởi bản cũ còn `target_field`.
+
+    `_register_all_to_central_registry()` chạy sau decorator lúc import, và
+    `SourceTypeRegistry.register()` gán đè `handler.fingerprint_fn` — nên bản
+    còn `target_field` thắng lúc chạy: N biến trỏ N field khác nhau trên CÙNG
+    một bản ghi → N nhóm → N query, mất hết tác dụng gộp của @batchable.
+    """
+
+    def setUp(self):
+        self.resolver = BatchBindingResolver()
+
+    def _linked_binding(self, var_name, target_field, target_doctype="AL Profile System"):
+        return {
+            "variable_name": var_name,
+            "source_type": "linked_doctype_field",
+            "source_config": json.dumps({
+                "link_field": "al_bom",
+                "target_doctype": target_doctype,
+                "target_field": target_field,
+            }),
+        }
+
+    def test_linked_doctype_same_doctype_one_group(self):
+        bindings = [
+            self._linked_binding("offset_frame", "offset_frame"),
+            self._linked_binding("offset_glass", "offset_glass"),
+        ]
+
+        groups = self.resolver._group_by_fingerprint(bindings)
+        self.assertEqual(
+            len(groups), 1,
+            "2 field khác nhau trên CÙNG target_doctype phải vào 1 nhóm — "
+            "ra 2 nghĩa là fingerprint đã bị đăng ký đè bởi bản còn target_field",
+        )
+
+        # Khác target_doctype thì VẪN phải tách nhóm (gom nhầm cũng là lỗi:
+        # 1 lệnh get_value chỉ đọc được trên 1 doctype).
+        bindings.append(self._linked_binding("item_weight", "weight", "Item"))
+        groups = self.resolver._group_by_fingerprint(bindings)
+        self.assertEqual(len(groups), 2, "Khác target_doctype → 2 nhóm")
+
+    def test_linked_doctype_batch_one_query_per_record(self):
+        bindings = [
+            self._linked_binding("offset_frame", "offset_frame"),
+            self._linked_binding("offset_glass", "offset_glass"),
+            # target_field rỗng → trả fallback/default_value ngay, không query.
+            {
+                "variable_name": "no_field",
+                "source_type": "linked_doctype_field",
+                "source_config": json.dumps({
+                    "link_field": "al_bom",
+                    "target_doctype": "AL Profile System",
+                    "target_field": "",
+                }),
+                "default_value": 99,
+            },
+        ]
+        doc = _FakeLinkedDoc("Quotation Item", {"al_bom": "ALPS-0001"})
+
+        with mock.patch.object(
+            frappe.db, "get_value",
+            return_value={"offset_frame": 1.5, "offset_glass": 2.5},
+        ) as get_value_mock:
+            result = _resolve_linked_doctype_field_batch(bindings, doc, {})
+
+        self.assertEqual(result["offset_frame"], 1.5)
+        self.assertEqual(result["offset_glass"], 2.5)
+
+        # Điểm mấu chốt chống N+1: 2 field trên CÙNG 1 bản ghi → ĐÚNG 1 lệnh
+        # get_value, và field truyền xuống là LIST gồm cả 2 (không phải 2 lệnh
+        # scalar riêng).
+        get_value_mock.assert_called_once()
+        args = get_value_mock.call_args.args
+        self.assertEqual(args[0], "AL Profile System")
+        self.assertEqual(args[1], "ALPS-0001")
+        self.assertIsInstance(
+            args[2], list,
+            "phải gộp NHIỀU field vào 1 lệnh get_value (list), không gọi từng field",
+        )
+        self.assertEqual(sorted(args[2]), ["offset_frame", "offset_glass"])
+        self.assertTrue(
+            get_value_mock.call_args.kwargs.get("as_dict"),
+            "đọc nhiều field phải as_dict=True để map lại theo tên field",
+        )
+
+        # target_field rỗng → fallback, KHÔNG tạo thêm query nào.
+        self.assertEqual(result["no_field"], 99)
