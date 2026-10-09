@@ -510,6 +510,27 @@ def register_source(
     This is the SINGLE canonical way to register a source type.
     Works with SourceTypeRegistry auto-discovery from hooks.py.
 
+    ⚠️ TWO REGISTRIES EXIST — this decorator is the ONLY one that writes to BOTH:
+      1. `SourceTypeRegistry` (this module, v31) — metadata + config_schema.
+      2. `_data_source_handlers` (legacy dict in `api/data_source_registry.py`)
+         for backward compat with old `get_handler(source_type)` callers.
+
+    The legacy-only decorator of the same name lives at
+    `api/data_source_registry.py` (top of file) and writes to registry 2 ONLY —
+    it must never be used for a new source type. Note that
+    `api/data_source_registry.py` re-binds the name `register_source` mid-file,
+    so a handler declared ABOVE that import silently gets the legacy decorator.
+
+    ⚠️ If the SAME handler function is registered twice (e.g. once by this
+    decorator and once by `_register_all_to_central_registry()`), then
+    `SourceTypeRegistry.register()` writes `handler.fingerprint_fn` and
+    `handler.batchable` back onto the function object — and the LATER
+    registration wins, silently. Both registries share that one function object,
+    so a fingerprint fixed in only one place is silently reverted at runtime.
+    Declare the fingerprint function ONCE at module level and pass it to every
+    registration site (see `_fingerprint_linked_doctype` in
+    `api/data_source_registry.py`). Full contract: `docs/fb_source_type_contract.md`.
+
     Args:
         source_type: Unique identifier.
         label: Human-readable name for UI.

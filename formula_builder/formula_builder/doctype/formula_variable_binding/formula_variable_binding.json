@@ -39,7 +39,7 @@
    "label": "Label"
   },
   {
-   "description": "Loại nguồn dữ liệu. Options nạp động từ SourceTypeRegistry (API list_source_types) — 17 built-in + custom type đăng ký từ app khác (hooks fb_source_types). Vẫn chấp nhận giá trị cũ lưu dạng chuỗi.",
+   "description": "Loại nguồn dữ liệu. Options nạp động từ SourceTypeRegistry (API list_source_types) — 19 built-in + custom type đăng ký từ app khác (hooks fb_source_types). Vẫn chấp nhận giá trị cũ lưu dạng chuỗi.",
    "fieldname": "source_type",
    "fieldtype": "Autocomplete",
    "in_standard_filter": 1,

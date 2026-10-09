@@ -48,7 +48,37 @@ class BaseDataSourceHandler(ABC):
 
 
 def register_source(source_type: str):
-    """Decorator to register a handler for a source_type."""
+    """Decorator ĐỜI CŨ — đăng ký handler vào source_type.
+
+    ⚠️⚠️ CẢNH BÁO: FB có **HAI registry**, và decorator này chỉ ghi vào **MỘT**:
+      1. `_data_source_handlers` (dict legacy, ngay bên dưới) — decorator NÀY.
+      2. `SourceTypeRegistry` (central, v31) — `api/source_type_registry.py`.
+
+    Decorator này KHÔNG nhận metadata (label / config_schema / batchable /
+    fingerprint_fn) và KHÔNG tự đồng bộ sang central registry. Nó chỉ còn để
+    giữ tương thích cho 13 built-in đăng ký ở khối phía trên (xem
+    `_register_all_to_central_registry()` — hàm này mới là chỗ đẩy 13 built-in
+    đó sang SourceTypeRegistry kèm metadata đầy đủ).
+
+    ⇒ **Thêm source type MỚI thì ĐỪNG dùng decorator này.** Dùng
+    `@register_source` từ `api/source_type_registry.py` (được import đè tên ở
+    cuối tệp này) — bản đó ghi vào **cả hai** registry. Contract đầy đủ:
+    `docs/fb_source_type_contract.md` §4.
+
+    ⇒ Nếu buộc phải khai ở khối đời cũ (trên dòng import đè tên) thì BẮT BUỘC
+    thêm source type đó vào `_register_all_to_central_registry()` nữa; nếu
+    không nó sẽ "đăng ký nửa vời": `get_handler()` vẫn chạy nhưng thiếu khỏi
+    admin UI, thiếu `config_schema` (⇒ không được validate config) và thiếu
+    metadata batch.
+
+    ⚠️ Thêm một bẫy đã xảy ra thật (2026-10, xem `_fingerprint_linked_doctype`):
+    khi CÙNG một hàm handler được đăng ký ở CẢ HAI chỗ,
+    `SourceTypeRegistry.register()` **gán ngược** `handler.fingerprint_fn` /
+    `handler.batchable` lên chính đối tượng hàm — hai registry trỏ cùng một
+    hàm nên **bản ghi sau thắng**. Sửa fingerprint ở decorator mà quên chỗ kia
+    là bản vá im lặng mất tác dụng lúc chạy. Cách bền: khai hàm fingerprint
+    MỘT LẦN ở cấp module rồi dùng cho cả hai chỗ.
+    """
     def decorator(func: Callable) -> Callable:
         _data_source_handlers[source_type] = func
         return func
@@ -1450,7 +1480,7 @@ def validate_binding_source_config(binding: dict) -> Optional[str]:
 # source_type_registry.py which also calls this.
 
 def _register_all_to_central_registry():
-    """Register all 10 built-in handlers with SourceTypeRegistry metadata."""
+    """Register all 13 built-in handlers with SourceTypeRegistry metadata."""
     try:
         from formula_builder.api.source_type_registry import SourceTypeRegistry
         registry = SourceTypeRegistry.get_instance()
@@ -1777,6 +1807,16 @@ _register_all_to_central_registry()
 # source_type_registry so they carry full metadata (config_schema, fingerprint,
 # batchable) in BOTH the central registry and the legacy handler dict.
 # ═══════════════════════════════════════════════════════════════════════════
+# ⚠️ DÒNG QUAN TRỌNG — ĐỔI NGHĨA TÊN `register_source` GIỮA TỆP.
+# Trước dòng này, `register_source` là decorator ĐỜI CŨ khai ở đầu tệp (chỉ ghi
+# `_data_source_handlers`, không metadata). Từ dòng này trở xuống, tên bị import
+# đè, nên mọi `@register_source(...)` phía dưới là bản central
+# (`api/source_type_registry.py`) — ghi vào CẢ HAI registry kèm metadata.
+# ⇒ Đặt handler mới ở TRÊN dòng này là tự động rơi vào bản đời cũ ⇒ thiếu khỏi
+# SourceTypeRegistry (không có label/config_schema ⇒ không lên admin UI, không
+# được validate config, mất metadata batch). Xem docstring của decorator đời cũ
+# ở đầu tệp và `docs/fb_source_type_contract.md` §4.
+# Đặt handler mới ở DƯỚI dòng này là đúng — như 6 source type platform bên dưới.
 from formula_builder.api.source_type_registry import register_source
 
 # Sentinel: a matched row exists but the value cell is empty → treat as no match

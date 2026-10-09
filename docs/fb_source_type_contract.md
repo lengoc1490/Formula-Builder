@@ -86,6 +86,35 @@ def _handle_my_source(binding, doc, resolved_so_far):
 
 Không cần đăng ký thủ công vào legacy dict. Không dùng decorator cũ `@register_source` (local trong `data_source_registry.py`) cho source type mới — decorator đó chỉ dành cho 13 built-in đầu (giữ backward-compat, đăng ký central qua `_register_all_to_central_registry()`).
 
+### 4.1 Bẫy ghi đè — `register_source` phải gọi ĐÚNG MỘT LẦN mỗi source type
+
+`SourceTypeRegistry.register()` không chỉ ghi bản ghi vào registry: nó còn **gán ngược**
+`handler.fingerprint_fn` / `handler.batchable` lên chính **đối tượng hàm**. Hai registry cùng
+trỏ về một hàm, nên khi cùng một handler được đăng ký ở hai chỗ (decorator cấp module +
+`_register_all_to_central_registry()`), **bản đăng ký sau thắng — im lặng**. Bộ giải batch đọc
+`getattr(handler, "fingerprint_fn", None)` trên hàm, ⛔ không đọc bản ghi trong registry, nên
+sửa fingerprint ở một chỗ mà quên chỗ kia là **bản vá mất tác dụng lúc chạy** (đã xảy ra thật
+2026-10 với `linked_doctype_field`: fingerprint còn sót `target_field` ⇒ mỗi field một nhóm ⇒
+N+1 không giảm).
+
+Nói cho chính xác: bản sau chỉ thắng khi giá trị sau **truthy** — `register()` ghi
+`handler.batchable = True` khi `batchable` đúng và gán `fingerprint_fn` khi khác `None`, nên đăng
+ký lần hai với `batchable=False` ⛔ **không xoá** cờ đã bật (cờ đơn điệu). Hệ quả: hàm và bản ghi
+registry **lệch nhau** (`handler.batchable=True` ⇄ `definition.batchable=False`) — đúng loại lệch
+mà test `#3` bắt.
+
+Quy tắc bền: khai hàm fingerprint **MỘT LẦN ở cấp module** rồi truyền vào **mọi** chỗ đăng ký
+(như `_fingerprint_linked_doctype`, `api/data_source_registry.py:309`).
+
+Chốt bằng MÁY (⛔ không chỉ bằng chú thích): `tests/test_registry_consistency.py`,
+lớp `TestRegistryConsistency` — khẳng định hai registry **đối xứng hai chiều** bằng tập tên,
+`handler.fingerprint_fn` phải là **cùng một đối tượng hàm** (`is`, ⛔ không phải bằng kết quả),
+cờ `batchable` khớp nhau, và mọi type `batchable=True` phải có fingerprint + `resolve_batch`
+Miễn trừ phải TƯỜNG MINH ở cấp module: `_NO_BATCH_RESOLVER` (hiện chỉ `pipeline` — batchable
+nhưng cố ý rơi về chạy từng binding) và `_DECORATOR_ONLY_BATCHABLE` (fixture của test module
+khác, chỉ đăng ký một chỗ bằng `@batchable` nên bản ghi registry ⛔ không có metadata).
+Thêm/bớt source type ⇒ test ĐỎ ⇒ buộc cập nhật cả tài liệu.
+
 ## 5. Handler contract
 
 ```python
@@ -148,7 +177,7 @@ ký sẽ tự xuất hiện, không cần sửa thêm):
 
 | API | Module | Mục đích |
 | --- | --- | --- |
-| `list_source_types()` | `api/source_type_registry.py` | Dropdown Autocomplete trên FVB — 17 built-in + mọi custom (A1). |
+| `list_source_types()` | `api/source_type_registry.py` | Dropdown Autocomplete trên FVB — 19 built-in + mọi custom (A1). |
 | `get_source_type_schema(source_type)` | ditto | Render form soạn `source_config` theo `config_schema` (A2). |
 | `validate_binding_source_config(source_type, source_config)` | ditto | Validate config trước khi lưu (đã có từ trước). |
 | `test_data_source(source_type, source_config)` | ditto | Test config với `doc=None` (cũ, backward compatible). |

@@ -131,7 +131,7 @@
 - **Multi-table engine** — Hỗ trợ tính toán đồng thời nhiều child table + global formulas trong một DAG
 - **Monaco Editor** — VS Code editor với syntax highlighting, autocomplete, hover, validation
 - **Batch Query Optimizer** — Gom nhóm query, giảm 90% queries so với cách làm N+1 thủ công
-- **13 data source types** — 10 built-in + 3 composite (pipeline, conditional, fallback_chain)
+- **19 data source types** — 10 built-in + 3 composite (pipeline, conditional, fallback_chain) + 6 tra cứu nâng cao (matrix_lookup, composite_key_lookup, range_lookup, child_table_lookup, aggregate_from_items, reuse_formula_result)
 - **SourceTypeRegistry** — Auto-discovery handler từ hooks.py, JSON Schema validation cho config
 - **Transform Layer** — Biến đổi dữ liệu sau resolve (multiply, divide, formula, round, cast)
 - **Industry-agnostic** — Nền tảng chung cho mọi ngành: nhôm kính, sản xuất, healthcare, retail, xây dựng
@@ -425,13 +425,13 @@ formula_builder/
 
 ### 6.5 Formula Variable Binding
 
-**Purpose:** **v3 Variable Binding System** — Extensible, declarative variable bindings with **13 source types** including composite types (pipeline, conditional, fallback_chain). Replaces legacy `custom_` field conventions with a registry-based approach.
+**Purpose:** **v3 Variable Binding System** — Extensible, declarative variable bindings with **19 source types**: 10 built-in, 3 composite (pipeline, conditional, fallback_chain), và 6 tra cứu nâng cao (matrix_lookup, reuse_formula_result, composite_key_lookup, range_lookup, child_table_lookup, aggregate_from_items). Replaces legacy `custom_` field conventions with a registry-based approach.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `variable_name` | Data (reqd) | — | Unique variable identifier |
 | `variable_label` | Data | — | Display label |
-| `source_type` | Select (reqd) | — | constant / linked_doctype_field / whole_doctype / child_table_aggregate / global_default / session_variable / doctype_query / custom_function / dynamic_link / computed / pipeline / conditional / fallback_chain |
+| `source_type` | Select (reqd) | — | constant / linked_doctype_field / whole_doctype / child_table_aggregate / global_default / session_variable / doctype_query / custom_function / dynamic_link / computed / pipeline / conditional / fallback_chain / matrix_lookup / reuse_formula_result / composite_key_lookup / range_lookup / child_table_lookup / aggregate_from_items |
 | `source_config` | JSON | — | Configuration for the source handler (schema-validated) |
 | `batch_group` | Data | — | **NEW v31:** Group key for batch query optimization. Same group → 1 query |
 | `resolve_priority` | Int | 100 | Resolution order (lower = earlier) |
@@ -443,7 +443,7 @@ formula_builder/
 | `is_global` | Check | 0 | Applies to all doctypes |
 | `is_active` | Check | 1 | Active flag |
 
-**10 Source Types** — See [Section 9.4](#94-data_source_registrypy--data-source-registry) for full details.
+**19 Source Types** — See [Section 9.4](#94-data_source_registrypy--data-source-registry) for full details.
 
 **Permission:** Only `System Manager` role.
 
@@ -509,6 +509,7 @@ FormulaEngine              — Top-level: explain, snapshot, scenarios, cache, s
 | `formulas` | `Dict[str, str]` | required | `{name: formula_expr}` map |
 | `safe_funcs` | `Dict[str, Callable]` | `BASE_FUNCS` | Allowed functions |
 | `on_error` | `str` | `"default"` | `"raise"` / `"null"` / `"default"` |
+| `zero_division_policy` | `str` | `None` (⇒ `"raise"`) | `"raise"` / `"warn"` / `"allow"` — riêng chia 0 |
 | `default_value` | `any` | `0` | Value when on_error=`"default"` |
 | `meta` | `FormulaSetMeta` | `None` | Formula set metadata |
 | `input_fields` | `List[InputField]` | `None` | Expected input schema |
@@ -523,6 +524,21 @@ FormulaEngine              — Top-level: explain, snapshot, scenarios, cache, s
 | `max_formula_count` | `int` | `None` | Maximum number of formulas |
 | `max_dependency_depth` | `int` | `None` | Maximum DAG depth |
 | `deterministic` | `bool` | `True` | Block `now()`/`today()`/`random()`? |
+
+> ⚠️ **Chia cho 0 ⛔ KHÔNG đi theo `on_error`.** Trong `formula_utils/engine_core.py`,
+> `except ZeroDivisionError` (`:779` `:881` `:956` `:1008`) đứng **TRƯỚC** `except Exception`
+> (`:781` `:883` `:958` `:1010`), nên `on_error="default"` / `"null"` ⛔ **không cứu được**
+> lỗi chia 0. Thứ quyết định là `zero_division_policy` (`_handle_zero_division()`, `:416-449`),
+> mặc định `"raise"` (`DEFAULT_ZERO_DIVISION_POLICY`, `:49`) — còn `on_error` mặc định `"default"`.
+> ⇒ **Cấu hình mặc định vẫn NÉM LỖI khi chia 0**, trái với điều `on_error="default"` khiến người đọc tưởng.
+>
+> | `zero_division_policy` | Hành vi thật (theo `_handle_zero_division`, `:416-449`) |
+> |---|---|
+> | `"raise"` (mặc định) | ném `FormulaZeroDivisionError`, **chặn lượt tính**; gợi ý dùng `safe_div()` |
+> | `"warn"` | ghi cảnh báo (`msgprint`, chỉ báo cam) + trả `default_value` |
+> | `"allow"` | trả `None` (nếu `on_error="null"`) hoặc `default_value`; ghi `_last_errors` im lặng |
+>
+> ⚠️ Riêng `"allow"`: nếu `on_error="raise"` thì **vẫn ném** — không trả giá trị.
 
 **Key methods:**
 
@@ -1025,7 +1041,7 @@ def handle_my_source(binding, doc, resolved_so_far):
     return resolved_value
 ```
 
-**10 Built-in Handlers:**
+**19 Built-in Handlers:**
 
 | Source Type | Description | Config Keys |
 |---|---|---|
@@ -1039,6 +1055,15 @@ def handle_my_source(binding, doc, resolved_so_far):
 | `custom_function` | Dynamic Python module import + call | `module_path`, `function_name`, `arguments` |
 | `dynamic_link` | Follow dynamic link (doctype_field + name_field) | `doctype_field`, `name_field`, `target_field` |
 | `computed` | Evaluate formula using resolved vars as context | `formula`, `dependencies` |
+| `pipeline` | Chain sources sequentially, output trước là input sau | `steps`, `merge_strategy` |
+| `conditional` | Chọn source theo điều kiện, nhánh khớp đầu tiên thắng | `branches`, `default` |
+| `fallback_chain` | Thử lần lượt tới khi thành công | `chain` |
+| `matrix_lookup` | Tra bảng giá/tham số 2 chiều theo row key + col key (có fallback key) | `doctype`, `value_field`, `row_key`, `col_key`, `fallback_row_key`, `fallback_col_key`, `filters`, `match_mode` |
+| `reuse_formula_result` | Tái dùng kết quả của chứng từ công thức/BOM/định mức khác, khớp dòng con theo key rồi aggregate | `formula_document`, `result_field`, `scope_field`, `scope_value`, `line_field`, `line_match`, `line_match_field`, `aggregation`, `filters` |
+| `composite_key_lookup` | Tra bảng N chiều theo bộ key động, hỗ trợ `fallback_keys`, `multipliers` | `doctype`, `value_field`, `key_fields`, `key_values`, `fallback_keys`, `multipliers`, `match_mode`, `filters` |
+| `range_lookup` | Tra bảng khoảng số (from–to → giá trị), dùng chung cho mọi ngành phân bậc theo ngưỡng | `doctype`, `value_field`, `input_value`, `range_from_field`, `range_to_field`, `filters` |
+| `child_table_lookup` | Tra ĐÚNG 1 dòng trong child table theo key rồi trả 1 field khác | `child_table_field`, `key_field`, `key_value`, `value_field`, `filter_active_field` |
+| `aggregate_from_items` | SUMIF-style: gom 1 field từ snapshot JSON / child table / doctype query / list đã resolve, lọc theo `key_field == key_value` | `rows_source`, `aggregate`, `value_field`, `key_field`, `key_value`, `snapshot_*`, `child_table_field`, `doctype`, `filters`, `fields` |
 
 **Dependency Resolution:**
 - `_get_dependency_graph(bindings)` — Builds adjacency graph
@@ -1236,7 +1261,7 @@ Body: {source_type: "doctype_query", source_config: "{...}"}
 
 # Get registry statistics
 GET /api/method/formula_builder.api.source_type_registry.get_registry_stats
-# → {total_source_types: 13, total_batchable: 4, by_app: {...}}
+# → {total_source_types: 19, total_batchable: 10, by_app: {...}}
 ```
 
 **JSON Schema Validation:**
@@ -2113,7 +2138,7 @@ def handle_custom(binding, doc, resolved):
 
 ## 19. Ví dụ theo ngành (NEW v31)
 
-Formula Builder is a multi-industry platform. Below are detailed examples from different verticals — all using the same 13 source types, differing only in configuration.
+Formula Builder is a multi-industry platform. Below are detailed examples from different verticals — all using the same 19 source types, differing only in configuration.
 
 ### 19.1 Nhôm Kính (AlumGlass)
 
@@ -2427,7 +2452,7 @@ formula_builder.formula.FunctionRegistry.addTemplate('My Category', {
 - [x] @batchable decorator + resolve_batch for 4 handlers
 - [x] Composite source types: pipeline, conditional, fallback_chain
 - [x] Transform layer: multiply, divide, formula, round, cast
-- [x] JSON Schema validation for all 13 source types
+- [x] JSON Schema validation for all 19 source types
 - [x] Industry examples: AlumGlass, Manufacturing, Healthcare, Retail, Construction
 
 **v32 (Planned):**

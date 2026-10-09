@@ -9,7 +9,7 @@ Coverage:
     A5    — binding_scope: scope-match semantics thống nhất (global/doctype/field).
 
 Lưu ý import order: phải import data_source_registry trước để module-level
-`_register_all_to_central_registry()` nạp 17 built-in vào central SourceTypeRegistry
+`_register_all_to_central_registry()` nạp 13 built-in vào central SourceTypeRegistry
 (import source_type_registry một mình → registry rỗng).
 """
 
@@ -75,18 +75,19 @@ def _b(name, source_type, cfg=None, batch_group="", doctype="Quotation Item", fi
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestRegistryMetadata(unittest.TestCase):
-    CANONICAL_17 = {
+    CANONICAL_BUILTIN = {
         "constant", "child_table_aggregate", "linked_doctype_field", "whole_doctype",
         "doctype_query", "matrix_lookup", "reuse_formula_result",
-        "composite_key_lookup", "aggregate_from_items", "pipeline", "global_default",
+        "composite_key_lookup", "range_lookup", "child_table_lookup",
+        "aggregate_from_items", "pipeline", "global_default",
         "session_variable", "custom_function", "dynamic_link", "computed",
         "conditional", "fallback_chain",
     }
 
     def test_all_builtin_registered(self):
         names = {d["source_type"] for d in list_source_types()}
-        self.assertEqual(len(self.CANONICAL_17), 17)
-        missing = self.CANONICAL_17 - names
+        self.assertEqual(len(self.CANONICAL_BUILTIN), 19)
+        missing = self.CANONICAL_BUILTIN - names
         self.assertEqual(missing, set(), f"built-in source types thiếu: {missing}")
 
     def test_entry_has_admin_fields(self):
@@ -100,10 +101,10 @@ class TestRegistryMetadata(unittest.TestCase):
 
     def test_batchable_flags_match_resolver(self):
         # Batchable theo resolver (handler attr) phải khớp metadata registry.
-        # Chỉ kiểm tra 17 built-in — fixture test tạo thêm có thể chỉ nằm một phía
+        # Chỉ kiểm tra 19 built-in — fixture test tạo thêm có thể chỉ nằm một phía
         # (legacy dict hoặc central registry), không thuộc contract parity này.
         meta = {d["source_type"]: d for d in list_source_types()}
-        for st in self.CANONICAL_17:
+        for st in self.CANONICAL_BUILTIN:
             d = meta[st]
             self.assertEqual(
                 _is_batchable(st), d["batchable"],
