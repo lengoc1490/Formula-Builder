@@ -53,9 +53,10 @@ FILE NÀY DÙNG ĐỘC LẬP — không phụ thuộc frappe.
 from __future__ import annotations
 
 import re
-from copy import deepcopy
+import warnings
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from formula_builder.formula_utils import (
     FormulaEngine,
@@ -65,7 +66,13 @@ from formula_builder.formula_utils import (
     InputField,
     OutputField,
     BASE_FUNCS,
+    html_unescape_formula,
+    html_escape_formula,
 )
+# Dò định danh phải dùng CHUNG một hàm với `DependencyGraph.build_from_exprs()`,
+# ⛔ không tự cài lại regex ở đây: hai bản song song sẽ trôi lệch nhau ⇒ thứ tự
+# tính theo một bộ cạnh, còn việc phát hiện "cần tính lại" theo bộ khác.
+from formula_builder.formula_utils.topo import extract_identifiers
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -234,14 +241,23 @@ class EngineConfig:
                     f"Nhận được: {gf}"
                 )
 
-        # Check duplicate variable names giữa các tables (cùng prefix+id_field)
-        prefixes = [tbl.prefix for tbl in self.child_tables]
-        if len(prefixes) != len(set(prefixes)):
-            # Cho phép trùng prefix nếu id_field khác nhau — warn thay vì raise
-            import warnings
+        # Check trùng tên biến giữa các tables: biến engine là f"{prefix}{row_id}",
+        # nên chỉ TRÙNG THẬT khi trùng CẢ (prefix, id_field).
+        # VÌ SAO sửa: trước đây chỉ so `prefix` mà quên `id_field`. Mà prefix mặc
+        # định là "" nên MỌI config có ≥2 bảng không đặt prefix đều bị kêu — trong
+        # khi câu cảnh báo lại ghi "Đảm bảo id_field của các dòng không trùng nhau"
+        # (điều mà mã chưa hề kiểm). Cảnh báo báo oan thì người ta học cách bỏ qua.
+        _seen_pairs: Dict[Tuple[str, str], int] = {}
+        for tbl in self.child_tables:
+            _key = (tbl.prefix, tbl.id_field)
+            _seen_pairs[_key] = _seen_pairs.get(_key, 0) + 1
+        _dup_pairs = sorted(k for k, n in _seen_pairs.items() if n > 1)
+        if _dup_pairs:
+            # Cho phép trùng nếu giá trị id của các dòng khác nhau — warn thay vì raise
             warnings.warn(
-                "[EngineConfig] Có 2 child tables dùng cùng prefix. "
-                "Đảm bảo id_field của các dòng không trùng nhau.",
+                "[EngineConfig] Có 2 child tables dùng cùng (prefix, id_field): "
+                + ", ".join(f"prefix={p!r}/id_field={d!r}" for p, d in _dup_pairs)
+                + ". Đảm bảo giá trị id_field của các dòng không trùng nhau.",
                 stacklevel=2,
             )
 
@@ -423,6 +439,57 @@ class FlexibleFormulaEngine:
         self._validator = FormulaValidator(allowed_functions=all_funcs)
 
     # ─────────────────────────────────────────────────────────────────────
+    # §4a′  Tham số khởi tạo FormulaEngine — MỘT bản duy nhất
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _collect_assertions(self) -> List[dict]:
+        """Assertion toàn cục + assertion của từng child table."""
+        all_assertions = list(self.config.assertions)
+        for tbl in self.config.child_tables:
+            all_assertions.extend(tbl.assertions)
+        return all_assertions
+
+    def _engine_kwargs(
+        self,
+        all_formulas: List[dict],
+        *,
+        on_error: Optional[str] = None,
+        include_assertions: bool = True,
+        include_schema: bool = True,
+        include_rounding: bool = True,
+    ) -> Dict[str, Any]:
+        """Bộ tham số để khởi tạo FormulaEngine — dùng CHUNG cho mọi chỗ gọi.
+
+        VÌ SAO phải gom về một chỗ: trước đây 6 chỗ tự liệt kê tay nên
+        `create_incremental_context()` chỉ truyền 4/13 tham số, RƠI MẤT
+        `rounding_policy`, `default_value`, `max_operations`, `assertions`,
+        `input_fields`, `output_fields`, `strict`. Ca đau nhất là
+        `rounding_policy`: lõi áp nó vô điều kiện khi có cấu hình, nên cùng input
+        mà `calculate()` CÓ làm tròn còn `create_incremental_context()` KHÔNG ⇒
+        UI hiện một số, lưu xuống số khác — lỗi im lặng, chỉ lộ ở tiền.
+
+        Thêm tham số mới cho FormulaEngine thì chỉ cần sửa ở đây, không săn lại
+        từng chỗ khởi tạo.
+        """
+        kwargs: Dict[str, Any] = {
+            "formulas":       all_formulas,
+            "on_error":       on_error if on_error is not None else self.config.on_error,
+            "default_value":  self.config.default_value,
+            "deterministic":  self.config.deterministic,
+            "max_operations": self.config.max_operations,
+            "safe_funcs":     self.config.custom_functions or None,
+            "strict":         self.config.strict,
+        }
+        if include_rounding:
+            kwargs["rounding_policy"] = self.config.rounding_policy or None
+        if include_assertions:
+            kwargs["assertions"] = self._collect_assertions() or None
+        if include_schema:
+            kwargs["input_fields"]  = self.config.input_fields or None
+            kwargs["output_fields"] = self.config.output_fields or None
+        return kwargs
+
+    # ─────────────────────────────────────────────────────────────────────
     # §4a  Tiền xử lý công thức: inject giá trị cột vào công thức
     # ─────────────────────────────────────────────────────────────────────
 
@@ -458,12 +525,16 @@ class FlexibleFormulaEngine:
                 and k not in self._FRAPPE_SYSTEM_FIELDS
             ]
 
+        # Gỡ HTML entity TRƯỚC khi thay cột: nếu để sau, "&amp;" tình cờ chứa tên
+        # cột "amp" sẽ bị thay thành giá trị số trước khi entity được giải.
+        formula = html_unescape_formula(formula)
+
         expr = formula
         # Sắp xếp dài trước: tránh "discount_pct" bị thay trước "discount"
         for col in sorted(row_fields, key=len, reverse=True):
             if col not in row:
                 continue
-            pattern = re.compile(rf"(?<!['\"\w\.])({re.escape(col)})(?!['\"\w])")
+            pattern = self._WORD_RE(col)
             if pattern.search(expr):
                 # repr() đảm bảo: 0.8 → "0.8", "ABC" → "'ABC'", True → "True"
                 expr = pattern.sub(repr(row[col]), expr)
@@ -499,8 +570,9 @@ class FlexibleFormulaEngine:
 
                 var_name = f"{tbl.prefix}{row_id}"
 
-                # Lấy công thức gốc
-                raw = (row.get(tbl.formula_field) or "").strip()
+                # Lấy công thức gốc — gỡ HTML entity trước khi .strip(), vì
+                # "&nbsp;" ở đầu/cuối sẽ thành khoảng trắng thường sau khi gỡ.
+                raw = html_unescape_formula(row.get(tbl.formula_field) or "").strip()
                 if not raw:
                     if tbl.skip_empty_formula:
                         continue
@@ -530,6 +602,10 @@ class FlexibleFormulaEngine:
         """
         Build formulas WITHOUT injection (for validation).
         Returns list of {"name": ..., "formula": raw_formula}
+
+        ⛔ Vẫn phải gỡ HTML entity (dù KHÔNG inject): validator và DependencyGraph
+        đều đọc chính chuỗi này. "K1 &gt; K2" chưa gỡ sẽ bị validator báo lỗi cú
+        pháp OAN và có thể sinh cạnh phụ thuộc ma vào công thức tên "gt".
         """
         formulas: List[dict] = []
         for tbl in self.config.child_tables:
@@ -538,7 +614,7 @@ class FlexibleFormulaEngine:
                 row_id = row.get(tbl.id_field)
                 if not row_id:
                     continue
-                raw = (row.get(tbl.formula_field) or "").strip()
+                raw = html_unescape_formula(row.get(tbl.formula_field) or "").strip()
                 if not raw:
                     if tbl.skip_empty_formula:
                         continue
@@ -622,61 +698,268 @@ class FlexibleFormulaEngine:
         if not all_formulas:
             return CalculationResult()
 
-        # Gộp tất cả assertions (global + từng table)
-        all_assertions = list(self.config.assertions)
-        for tbl in self.config.child_tables:
-            all_assertions.extend(tbl.assertions)
+        # Khởi tạo FormulaEngine — tham số lấy từ helper DÙNG CHUNG để mọi đường
+        # vào engine không lệch cấu hình nhau nữa.
+        engine = FormulaEngine(**self._engine_kwargs(all_formulas))
+        return self._run_engine(engine, all_formulas, context, inputs)
 
-        # Khởi tạo FormulaEngine
-        engine = FormulaEngine(
-            formulas          = all_formulas,
-            on_error          = self.config.on_error,
-            default_value     = self.config.default_value,
-            deterministic     = self.config.deterministic,
-            max_operations    = self.config.max_operations,
-            rounding_policy   = self.config.rounding_policy or None,
-            assertions        = all_assertions or None,
-            safe_funcs        = self.config.custom_functions or None,
-            input_fields      = self.config.input_fields or None,
-            output_fields     = self.config.output_fields or None,
-            strict            = self.config.strict,
-        )
+    # ─────────────────────────────────────────────────────────────────────
+    # §4d′  Chạy engine đã dựng + gom kết quả/lỗi/cảnh báo
+    # ─────────────────────────────────────────────────────────────────────
 
-        # Tính toán 1 lần cho toàn bộ
+    def _run_engine(
+        self,
+        engine: "FormulaEngine",
+        all_formulas: List[dict],
+        context: Dict[str, Any],
+        inputs: Dict[str, Any],
+    ) -> CalculationResult:
+        """Tính toán 1 lần cho toàn bộ + write-back + phân loại lỗi/cảnh báo.
+
+        Tách khỏi `calculate()` để `multi_scenario()` dùng lại được engine khi
+        nhiều kịch bản cho ra CÙNG bộ công thức (kịch bản chỉ đổi biến scalar).
+        """
+        # ── LƯỢT 1 — nguyên vẹn như trước bản vá ────────────────────────────
         raw_results = engine.calculate(context)
 
-        # Thu thập lỗi
-        errors: Dict[str, str] = {}
-        if hasattr(engine, 'last_errors') and engine.last_errors:
-            # Core đã được cập nhật, lấy trực tiếp
-            errors = engine.last_errors.copy()
-        else:
-            # Fallback cho core cũ: chạy lại với on_error="null"
-            if self.config.on_error != "raise":
-                _err_engine = FormulaEngine(
-                    formulas=all_formulas,
-                    on_error="null",
-                    deterministic=self.config.deterministic,
-                    max_operations=self.config.max_operations,
-                    safe_funcs=self.config.custom_functions or None,
-                    strict=self.config.strict,
-                )
-                _err_results = _err_engine.calculate(context)
-                for name, val in _err_results.items():
-                    if val is None:
-                        errors[name] = f"Formula '{name}' returned error (on_error=null → None)"
-                    elif isinstance(val, FormulaError):
-                        errors[name] = str(val)
+        errors = self._collect_errors(engine, all_formulas, context)
+        warnings_out = self._collect_warnings(engine)
 
         # Write-back + nhóm row_results
         row_results = self._write_back(inputs, raw_results)
 
+        # ── LƯỢT 2 CÓ MỤC TIÊU ──────────────────────────────────────────────
+        # VÌ SAO cần lượt 2: `_write_back()` ghi `output_field` vào dòng SAU khi
+        # lượt DAG duy nhất đã chạy xong, nên công thức header dạng
+        # `sum(r.get('amount',0) for r in items)` đọc phải 0 (lượt đầu) hoặc giá
+        # trị CŨ của lần gọi trước (dòng bị mutate in-place) — sai ở TIỀN mà
+        # không có exception nào. Chỉ chạy lượt 2 khi cấu hình THẬT SỰ dùng mẫu
+        # đọc-dòng, và chỉ cho đúng những công thức bị ảnh hưởng.
+        pass2_formulas = self._second_pass_formulas(engine, all_formulas)
+        if not pass2_formulas:
+            # ⛔ Không có công thức đọc-dòng ⇒ zero-cost, zero-thay-đổi-hành-vi.
+            return CalculationResult(
+                values      = raw_results,
+                row_results = row_results,
+                errors      = errors,
+                warnings    = warnings_out,
+            )
+
+        # `context2` = số liệu lượt 1 + các dòng ĐÃ có `output_field` (write-back
+        # ở trên sửa tại chỗ chính các dict nằm trong `context[table_key]`).
+        # VÌ SAO nhét cả `raw_results` vào context: công thức lượt 2 vẫn cần các
+        # giá trị phía trước (`K1`, `TAX_T1`…). Chúng trở thành HẰNG ⇒ ⛔ không
+        # tính lại công thức dòng nào ⇒ không rủi ro công thức không idempotent
+        # (ví dụ `output_field` lọt vào `row_fields`).
+        # ⛔ Cách này KHÔNG chia DAG thành "bảng trước, header sau": công thức
+        # dòng tham chiếu công thức header (`TAX_T1: subtotal * rate`) vẫn đi
+        # đúng một lượt như cũ — chia thô sẽ làm vỡ chiều tham chiếu đó.
+        context2 = {**context, **raw_results}
+        engine2 = FormulaEngine(**self._engine_kwargs(
+            pass2_formulas,
+            include_assertions=True,   # assertion phải thấy số CUỐI, ⛔ không phải số lượt 1
+            include_schema=False,      # ⛔ tránh báo lỗi schema lần thứ hai
+            include_rounding=True,     # giữ đúng chính sách làm tròn
+        ))
+        results2 = engine2.calculate(context2)
+
+        # Gộp: bảng lỗi/cảnh báo phải phản ánh lượt 2 (số cuối), không phải lượt 1.
+        errors = self._merge_second_pass_errors(errors, engine2, pass2_formulas)
+        warnings_out = self._merge_second_pass_warnings(warnings_out, engine2)
+
+        merged = {**raw_results, **results2}
+        # Ghi LẠI: cần khi công thức DÒNG cũng là consumer (giá trị dòng đổi ở
+        # lượt 2). Ở ca thường đây là ghi đè idempotent nên vô hại.
+        row_results = self._write_back(inputs, merged)
+
         return CalculationResult(
-            values      = raw_results,
+            values      = merged,
             row_results = row_results,
             errors      = errors,
-            warnings    = [],
+            warnings    = warnings_out,
         )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # §4d″  Lượt hai có mục tiêu: dò consumer + node phía sau
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _second_pass_formulas(
+        self,
+        engine: "FormulaEngine",
+        all_formulas: List[dict],
+    ) -> List[dict]:
+        """Công thức của LƯỢT HAI = consumer ∪ mọi node phía sau chúng.
+
+        Trả về list RỖNG khi cấu hình không dùng mẫu đọc-dòng — nơi gọi dựa vào
+        đó để giữ nguyên hành vi cũ (⛔ zero-cost).
+
+        VÌ SAO phải kéo cả node PHÍA SAU: `subtotal` tính lại rồi mà
+        `grandtotal = subtotal + shipping_fee` vẫn giữ số cũ thì lỗi chỉ chạy
+        từ chỗ này sang chỗ khác. Cạnh lấy từ `engine.dependency_edges()`
+        (``{node: [node_phụ_thuộc]}``) rồi ĐẢO CHIỀU thành ``{node: [node_đứng_sau]}``.
+        """
+        consumers = self._row_output_consumers(all_formulas)
+        if not consumers:
+            return []
+
+        formula_names = {f["name"] for f in all_formulas}
+        dependents: Dict[str, Set[str]] = {}
+        for node, parents in engine.dependency_edges().items():
+            for parent in parents:
+                dependents.setdefault(parent, set()).add(node)
+
+        # BFS từ consumer; ⛔ chỉ đi trong tập TÊN CÔNG THỨC, bỏ qua tên khác
+        # (biến input, tên hàm…) để không kéo nhầm node vào lượt 2.
+        pass2: Set[str] = {c for c in consumers if c in formula_names}
+        queue = deque(pass2)
+        while queue:
+            for name in dependents.get(queue.popleft(), ()):
+                if name in formula_names and name not in pass2:
+                    pass2.add(name)
+                    queue.append(name)
+
+        # Giữ nguyên thứ tự của `all_formulas` ⇒ kết quả DETERMINISTIC, và bộ
+        # công thức gửi vào engine lượt 2 không phụ thuộc thứ tự duyệt set.
+        return [f for f in all_formulas if f["name"] in pass2]
+
+    def _row_output_consumers(self, all_formulas: List[dict]) -> Set[str]:
+        """Tên các công thức ĐỌC DỮ LIỆU BẢNG DÒNG (consumer).
+
+        Ví dụ ``sum(r.get('amount',0) for r in items)`` — đọc ``items``, mà
+        ``items`` là TÊN BẢNG chứ không phải tên công thức, nên
+        `DependencyGraph.build_from_exprs()` ⛔ không sinh cạnh nào cho nó: công
+        thức này không được xếp sau các dòng bảng. Đó chính là gốc lỗi.
+
+        Dò bằng `extract_identifiers()` — CHÍNH hàm mà `build_from_exprs()` dùng
+        để dựng cạnh, để thứ tự tính và việc phát hiện không bao giờ lệch nhau.
+        Xét CẢ công thức dòng lẫn công thức header.
+
+        ⚠️ Trùng tên chỉ là trùng TÊN ĐỊNH DANH: công thức dùng biến
+        ``items_count`` ⛔ không bị coi là đọc bảng ``items``.
+        """
+        table_names = {tbl.table_key for tbl in self.config.child_tables}
+        if not table_names:
+            return set()
+        return {
+            f["name"] for f in all_formulas
+            if extract_identifiers(f["formula"]) & table_names
+        }
+
+    def _assertion_names(self) -> Set[str]:
+        """Tên các assertion đã cấu hình.
+
+        VÌ SAO cần: assertion được chạy LẠI ở lượt 2 (engine2 có
+        `include_assertions=True`), nên phán quyết của lượt 1 là số CŨ.
+        """
+        return {a.get("name") for a in self._collect_assertions() if a.get("name")}
+
+    def _merge_second_pass_errors(
+        self,
+        errors: Dict[str, str],
+        engine2: "FormulaEngine",
+        pass2_formulas: List[dict],
+    ) -> Dict[str, str]:
+        """Gộp bảng lỗi hai lượt: bỏ phán quyết CŨ của thứ mà lượt 2 đã tính lại.
+
+        ⛔ VÌ SAO phải BỎ chứ không chỉ `update()`: `update()` chỉ thay được khoá
+        nào lượt 2 CÓ báo lỗi. Ca thật: assertion ``subtotal > 0`` lượt 1 thấy
+        `subtotal = 0` (lỗi đang vá) ⇒ ghi lỗi OAN; lượt 2 thấy 350 ⇒ không ghi
+        gì, nên nếu giữ nguyên thì lỗi oan ở lại vĩnh viễn và người dùng bị chặn
+        bởi một cảnh báo sai.
+
+        Bỏ được cả khoá assertion vì lượt 2 CHẠY LẠI toàn bộ assertion trên
+        `context2` (đã chứa MỌI giá trị công thức của lượt 1), nên phán quyết
+        của lượt 2 luôn đầy đủ và đúng hơn lượt 1.
+        """
+        stale = {f["name"] for f in pass2_formulas} | self._assertion_names()
+        out = {name: msg for name, msg in errors.items() if name not in stale}
+        out.update(getattr(engine2, "last_errors", None) or {})
+        return out
+
+    def _merge_second_pass_warnings(
+        self,
+        first_pass: List[str],
+        engine2: "FormulaEngine",
+    ) -> List[str]:
+        """Gộp cảnh báo hai lượt, khử trùng theo (tên assertion, thông điệp).
+
+        `_collect_warnings()` đã render mỗi cảnh báo thành chuỗi
+        ``"tên: thông điệp"`` nên khử trùng theo CHUỖI chính là khử theo cặp
+        (tên, thông điệp). Giữ nguyên thứ tự lượt 1 trước ⇒ danh sách cảnh báo
+        của cấu hình không dùng mẫu đọc-dòng không đổi.
+        """
+        out: List[str] = []
+        seen: Set[str] = set()
+        for msg in list(first_pass) + self._collect_warnings(engine2):
+            if msg in seen:
+                continue
+            seen.add(msg)
+            out.append(msg)
+        return out
+
+    def _collect_errors(
+        self,
+        engine: "FormulaEngine",
+        all_formulas: List[dict],
+        context: Dict[str, Any],
+    ) -> Dict[str, str]:
+        """Lấy bảng lỗi của lần calculate vừa rồi."""
+        if hasattr(engine, "last_errors"):
+            # Lõi hiện tại (ENGINE_VERSION 31.x) LUÔN có property `last_errors`
+            # ⇒ lấy TRỰC TIẾP, không chạy lại công thức.
+            #
+            # ⚠️ VÌ SAO đổi điều kiện (trước đây: `hasattr(...) AND engine.last_errors`):
+            # `last_errors` trả dict {tên: lỗi} của lần calculate gần nhất, nên khi
+            # MỌI công thức chạy sạch nó là {} — falsy. Điều kiện cũ vì thế rơi vào
+            # nhánh dự phòng đúng ở ca phổ biến nhất: KHÔNG có lỗi thì mới dựng
+            # FormulaEngine THỨ HAI và eval lại toàn bộ. Ngược hẳn ý đồ, và tốn gấp
+            # đôi cho mọi lần tính sạch.
+            return engine.last_errors.copy()
+
+        # ── Đường lùi cho lõi CŨ (chưa có `last_errors`) — giữ nguyên, ⛔ không xoá.
+        errors: Dict[str, str] = {}
+        if self.config.on_error == "raise":
+            return errors
+        _err_engine = FormulaEngine(**self._engine_kwargs(
+            all_formulas,
+            on_error="null",
+            include_assertions=False,
+            include_schema=False,
+            include_rounding=False,
+        ))
+        _err_results = _err_engine.calculate(context)
+        _err_map = getattr(_err_engine, "last_errors", None)
+
+        for name, val in _err_results.items():
+            if _err_map is not None:
+                # Lõi có bảng lỗi ⇒ chỉ báo ĐÚNG công thức đã lỗi.
+                # ⛔ KHÔNG suy lỗi từ `val is None`: công thức HỢP LỆ trả None
+                # (row.get('x') thiếu khoá, min() trên list rỗng…) sẽ bị báo oan.
+                if name in _err_map:
+                    errors[name] = _err_map[name]
+            elif isinstance(val, FormulaError):
+                errors[name] = str(val)
+            elif val is None:
+                errors[name] = f"Formula '{name}' returned error (on_error=null → None)"
+        return errors
+
+    def _collect_warnings(self, engine: "FormulaEngine") -> List[str]:
+        """Cảnh báo assertion (severity=WARNING) của lần calculate vừa rồi.
+
+        `getattr` để chạy được với lõi cũ (chưa có `last_warnings`).
+        """
+        raw_warnings = getattr(engine, "last_warnings", None) or []
+        out: List[str] = []
+        for w in raw_warnings:
+            name = getattr(w, "assertion_name", None)
+            msg = getattr(w, "message", None)
+            if msg is None:          # lõi khác trả chuỗi thẳng
+                out.append(str(w))
+            elif name:
+                out.append(f"{name}: {msg}")
+            else:
+                out.append(str(msg))
+        return out
 
     # ─────────────────────────────────────────────────────────────────────
     # §4e  PUBLIC: create_incremental_context() — Reactive UI
@@ -708,14 +991,39 @@ class FlexibleFormulaEngine:
 
         for tbl in self.config.child_tables:
             rows = context.get(tbl.table_key) or []
+
+            # ── Tự dò cột: MỘT LẦN cho cả bảng, HỢP NHẤT mọi dòng ────────────
+            # VÌ SAO nâng ra ngoài vòng lặp dòng: trước đây `fields` được gán lại
+            # (rebind) BÊN TRONG vòng lặp, nên bộ cột tự dò của DÒNG 1 bị dùng luôn
+            # cho các dòng sau. Dòng 2 có thêm cột (vd `vat`) mà dòng 1 không có
+            # ⇒ cột đó không được đổi tên thành `vat_K2` ⇒ công thức giữ tên trần
+            # `vat`, LẶNG LẼ bám vào biến context ngoài (hoặc thành biến không xác
+            # định) → sai số.
+            # ⚠️ `fields` chỉ được GÁN LẠI chứ ⛔ không append vào `tbl.row_fields`,
+            # nên lỗi cũ chỉ trong phạm vi MỘT lần gọi, một bảng — không rò rỉ.
             fields = tbl.row_fields
+            if not fields:
+                _union: Dict[str, None] = {}    # dict giữ thứ tự, tự khử trùng
+                for _row in rows:
+                    for _k, _v in _row.items():
+                        if (isinstance(_v, (int, float, bool))
+                                and not isinstance(_v, type)
+                                and not _k.startswith("_")
+                                # Lọc trường hệ thống Frappe cho KHỚP _inject_row_values
+                                # (:458). Thiếu bộ lọc này thì name/owner/idx/parent/
+                                # docstatus bị đổi thành name_K1, owner_K1… rác.
+                                and _k not in self._FRAPPE_SYSTEM_FIELDS):
+                            _union[_k] = None
+                fields = list(_union)
 
             for row in rows:
                 row_id = row.get(tbl.id_field)
                 if not row_id:
                     continue
                 var_name = f"{tbl.prefix}{row_id}"
-                raw = (row.get(tbl.formula_field) or "").strip()
+                # Gỡ HTML entity trước khi đổi tên cột — nếu để sau, "&amp;" chứa
+                # tên cột "amp" sẽ bị đổi tên oan thành "amp_K1".
+                raw = html_unescape_formula(row.get(tbl.formula_field) or "").strip()
                 if not raw:
                     if tbl.skip_empty_formula:
                         continue
@@ -725,21 +1033,12 @@ class FlexibleFormulaEngine:
                     )
 
                 # Đổi tên biến cột: qty → qty_{row_id}
-                if not fields:
-                    fields = [
-                        k for k, v in row.items()
-                        if isinstance(v, (int, float, bool))
-                        and not k.startswith("_")
-                    ]
                 renamed_formula = raw
                 for col in sorted(fields, key=len, reverse=True):
                     if col not in row:
                         continue
                     scoped_name = f"{col}_{row_id}"
-                    pattern = re.compile(
-                        rf"(?<!['\"\w\.])({re.escape(col)})(?!['\"\w])"
-                    )
-                    renamed_formula = pattern.sub(scoped_name, renamed_formula)
+                    renamed_formula = self._WORD_RE(col).sub(scoped_name, renamed_formula)
                     incremental_vars[scoped_name] = row[col]
 
                 formulas.append({"name": var_name, "formula": renamed_formula})
@@ -750,12 +1049,10 @@ class FlexibleFormulaEngine:
         # Merge incremental_vars vào context (ưu tiên thấp hơn inputs)
         full_context = {**incremental_vars, **context}
 
-        engine = FormulaEngine(
-            formulas      = all_formulas,
-            on_error      = self.config.on_error,
-            deterministic = self.config.deterministic,
-            safe_funcs    = self.config.custom_functions or None,
-        )
+        # Dùng chung helper tham số: trước đây chỗ này chỉ truyền 4/13 tham số nên
+        # RƠI MẤT rounding_policy, default_value, max_operations, assertions,
+        # input_fields, output_fields, strict ⇒ UI hiện một số, lưu xuống số khác.
+        engine = FormulaEngine(**self._engine_kwargs(all_formulas))
         ctx = engine.create_context(full_context)
         return ctx, engine, name_to_table
 
@@ -797,12 +1094,26 @@ class FlexibleFormulaEngine:
     # §4g  PUBLIC: explain() / explain_all() — Debug
     # ─────────────────────────────────────────────────────────────────────
 
-    def explain(self, formula_name: str, inputs: Dict[str, Any]) -> Any:
+    def explain(
+        self,
+        formula_name: str,
+        inputs: Dict[str, Any],
+        escape_html: bool = False,
+    ) -> Any:
         """
         Trả về ExplainResult cho một formula — từng bước tính chi tiết.
 
         Hữu ích để hiển thị "Bảng tính chi tiết" trong Frappe form.
         Kết quả có thể dùng ``.to_dict()`` để serialize sang JSON cho JS.
+
+        escape_html : bool = False
+            ⛔ MẶC ĐỊNH TẮT (trả bản RAW) — và đây là chủ ý, không phải sót.
+            `formula_builder.js::_actExplain` đã escape MỘT lần bằng `_esc()`
+            trước khi đổ vào innerHTML; escape thêm ở đây nữa thì người dùng
+            ĐỌC THẤY `a &gt; b` thay vì `a > b` — đúng thứ mà lớp gỡ entity ở
+            cửa vào vừa dọn. Chuẩn của cả lớp: escape ĐÚNG MỘT LẦN, ở lớp NGOÀI
+            CÙNG của đường hiển thị. Template in ấn render thẳng HTML mà không
+            tự escape thì truyền True.
 
         Example
         -------
@@ -814,26 +1125,29 @@ class FlexibleFormulaEngine:
         context = {**self.config.extra_context, **inputs}
         all_formulas, _ = self._build_all_formulas(context)
 
-        eng = FormulaEngine(
-            formulas      = all_formulas,
-            on_error      = "raise",
-            deterministic = self.config.deterministic,
-            safe_funcs    = self.config.custom_functions or None,
-        )
-        return eng.explain(formula_name, context)
+        # on_error lấy từ config, ⛔ KHÔNG cứng "raise".
+        # VÌ SAO: explain() là công cụ GỠ LỖI; cứng on_error="raise" khiến nó ném
+        # lỗi ngay khi công thức hỏng — hỏng đúng lúc người ta cần nó nhất. Để
+        # theo config (mặc định "default") thì explain() vẫn trả về các bước đã
+        # tính được thay vì đổ.
+        eng = FormulaEngine(**self._engine_kwargs(all_formulas))
+        # escape ở LỚP NGOÀI CÙNG (đây) — tắt escape của lõi để ⛔ không escape 2 lần.
+        return eng.explain(formula_name, context, escape_html=escape_html)
 
-    def explain_all(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
-        """Explain tất cả formulas — trả về dict {name: ExplainResult}."""
+    def explain_all(
+        self,
+        inputs: Dict[str, Any],
+        escape_html: bool = False,
+    ) -> Dict[str, Any]:
+        """Explain tất cả formulas — trả về dict {name: ExplainResult}.
+
+        Xem `explain()` về tham số escape_html.
+        """
         context = {**self.config.extra_context, **inputs}
         all_formulas, _ = self._build_all_formulas(context)
 
-        eng = FormulaEngine(
-            formulas      = all_formulas,
-            on_error      = self.config.on_error,
-            deterministic = self.config.deterministic,
-            safe_funcs    = self.config.custom_functions or None,
-        )
-        return eng.explain_all(context)
+        eng = FormulaEngine(**self._engine_kwargs(all_formulas))
+        return eng.explain_all(context, escape_html=escape_html)
 
     # ─────────────────────────────────────────────────────────────────────
     # §4h  PUBLIC: multi_scenario() — So sánh kịch bản
@@ -866,13 +1180,57 @@ class FlexibleFormulaEngine:
             )
             diff = results["premium"].get("grandtotal") - results["base"].get("grandtotal")
         """
+        # TÁI DÙNG ENGINE: nhiều kịch bản thường chỉ đổi biến SCALAR, khi đó phần
+        # inject giá trị cột cho ra ĐÚNG CÙNG bộ công thức. Dựng lại FormulaEngine
+        # (parse + dựng DAG) cho từng kịch bản là làm thừa — cache theo dấu vân
+        # tay của bộ công thức trong phạm vi MỘT lần gọi.
+        # Kịch bản có đổi dữ liệu dòng ⇒ công thức khác ⇒ tự động dựng engine mới.
+        _engines: Dict[tuple, Any] = {}
+
         output: Dict[str, CalculationResult] = {}
         for name, overrides in scenarios.items():
-            merged = deepcopy(base_inputs)
-            for k, v in overrides.items():
-                merged[k] = v
-            output[name] = self.calculate(merged)
+            merged = self._clone_scenario_inputs(base_inputs, overrides)
+            context = {**self.config.extra_context, **merged}
+            all_formulas, _ = self._build_all_formulas(context)
+            if not all_formulas:
+                output[name] = CalculationResult()
+                continue
+
+            key = tuple((f["name"], f["formula"]) for f in all_formulas)
+            _eng = _engines.get(key)
+            if _eng is None:
+                _eng = FormulaEngine(**self._engine_kwargs(all_formulas))
+                _engines[key] = _eng
+
+            output[name] = self._run_engine(_eng, all_formulas, context, merged)
         return output
+
+    def _clone_scenario_inputs(
+        self,
+        base_inputs: Dict[str, Any],
+        overrides: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Bản sao input cho một kịch bản.
+
+        VÌ SAO không dùng `deepcopy(base_inputs)`: chỉ những dict DÒNG của child
+        table có `output_field` mới bị `_write_back()` sửa tại chỗ — nếu dùng
+        chung `base_inputs` thì kịch bản sau sẽ nhìn thấy kết quả kịch bản trước
+        đã ghi vào. Các giá trị scalar KHÔNG bị ghi nên dùng lại được, khỏi
+        deepcopy cả cây (base_inputs có thể chứa list/dict lớn).
+        """
+        merged = dict(base_inputs)
+        _written_keys = {
+            tbl.table_key for tbl in self.config.child_tables if tbl.output_field
+        }
+        for table_key in _written_keys:
+            rows = base_inputs.get(table_key)
+            if isinstance(rows, list):
+                merged[table_key] = [
+                    dict(r) if isinstance(r, dict) else r for r in rows
+                ]
+        for k, v in overrides.items():
+            merged[k] = v
+        return merged
 
     # ─────────────────────────────────────────────────────────────────────
     # §4i  PUBLIC: get_dependency_graph() — Hiển thị DAG
@@ -886,25 +1244,25 @@ class FlexibleFormulaEngine:
         context = {**self.config.extra_context, **inputs}
         all_formulas, _ = self._build_all_formulas(context)
         # Tạo engine tạm (không cache)
-        eng = FormulaEngine(
-            formulas=all_formulas,
-            on_error=self.config.on_error,
-            deterministic=self.config.deterministic,
-            safe_funcs=self.config.custom_functions or None,
-        )
-        return {name: list(eng._deps_cache.get(name, set())) for name in eng._topo_order}
+        eng = FormulaEngine(**self._engine_kwargs(all_formulas))
+        # Dùng accessor CÔNG KHAI của lõi thay vì chọc thẳng vào `eng._deps_cache`
+        # / `eng._topo_order` (thuộc tính riêng của lớp khác — đổi cấu trúc bên
+        # trong là chỗ này vỡ im lặng).
+        return eng.dependency_edges()
 
     # ─────────────────────────────────────────────────────────────────────
     # §4j  PUBLIC: preview_resolved_formulas() — Debug inject
     # ─────────────────────────────────────────────────────────────────────
 
     def preview_resolved_formulas(
-        self, inputs: Dict[str, Any]
+        self, inputs: Dict[str, Any], escape_html: bool = False
     ) -> List[Dict[str, str]]:
         """
         Trả về danh sách công thức SAU KHI inject giá trị cột.
 
-        Dùng để debug: kiểm tra engine thực sự nhận công thức gì.
+        Dùng để debug: kiểm tra engine thực sự nhận công thức gì. Mặc định trả
+        bản RAW (escape_html=True nếu nơi hiển thị không tự escape — ⛔ xem
+        `explain()` để hiểu vì sao mặc định phải là RAW).
 
         Returns
         -------
@@ -924,15 +1282,24 @@ class FlexibleFormulaEngine:
         for f in self.config.global_formulas:
             raw_map[f["name"]] = f["formula"]
 
-        return [
-            {
+        # `changed` tính trên bản THÔ, escape chỉ áp cho phần hiển thị —
+        # escape trước rồi so sẽ làm mọi công thức có '>' '<' '&' thành "changed".
+        _fmt = (lambda s: html_escape_formula(s)) if escape_html else (lambda s: s)
+        out: List[Dict[str, str]] = []
+        for f in all_formulas:
+            # `original` hiển thị công thức NGƯỜI DÙNG nhập (`qty > rate`), ⛔ không
+            # phải bản entity đang nằm trong DB (`qty &gt; rate`) — entity là chi
+            # tiết lưu trữ, phơi thẳng ra UI chỉ làm người đọc tưởng công thức hỏng.
+            # `changed` cũng phải so trên bản ĐÃ gỡ entity: so với bản entity thì
+            # mọi công thức chứa '>' '<' '&' đều bị báo "đã đổi" dù chẳng inject gì.
+            original = html_unescape_formula(raw_map.get(f["name"], f["formula"]))
+            out.append({
                 "name":     f["name"],
-                "formula":  f["formula"],
-                "original": raw_map.get(f["name"], f["formula"]),
-                "changed":  f["formula"] != raw_map.get(f["name"], f["formula"]),
-            }
-            for f in all_formulas
-        ]
+                "formula":  _fmt(f["formula"]),
+                "original": _fmt(original),
+                "changed":  f["formula"] != original,
+            })
+        return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1091,6 +1458,17 @@ class ERPNextAdapter:
                 ),
             ],
             global_formulas=[
+                # ⚠️ Mẫu đọc-dòng dưới đây nay CHẠY ĐÚNG (nhờ "lượt hai có mục
+                # tiêu": công thức đọc bảng dòng được tính lại SAU khi bảng đã
+                # tính xong và đã ghi vào output_field). Nhưng nó vẫn GIÒN:
+                #   • chỉ đọc được output_field của bảng ĐÃ tính xong trong cùng
+                #     lượt — ⛔ không đọc được output_field của bảng KHÁC nếu
+                #     bảng đó chưa tính xong;
+                #   • tên cột trong .get('amount', …) phải khớp CHÍNH XÁC
+                #     output_field, đổi một trong hai là im lặng trả 0.
+                # ✅ Bền hơn: tham chiếu thẳng tên biến dòng do engine sinh ra
+                #    ("K1 + K2 + K3") — vừa có cạnh DAG tường minh, vừa không
+                #    phụ thuộc tên cột.
                 {"name": "subtotal",   "formula": "sum(r.get('amount',0) for r in items)"},
                 {"name": "total_tax",  "formula": "sum(r.get('tax_amount',0) for r in taxes)"},
                 {"name": "grandtotal", "formula": "subtotal + total_tax + shipping_fee"},

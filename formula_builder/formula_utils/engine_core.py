@@ -23,17 +23,19 @@ from .errors import (
     FormulaBudgetExceeded, 
     FormulaComplexityError,
     FormulaZeroDivisionError,
+    FormulaAssertionError,
 )
 from .types import (
-    FormulaSetMeta, 
-    InputField, 
-    OutputField, 
-    IncrementalStats, 
-    Assertion, 
+    FormulaSetMeta,
+    InputField,
+    OutputField,
+    IncrementalStats,
+    Assertion,
+    AssertionViolation,
     AuditLevel,
     ValidationResult
 )
-from .normalize import hash_formulas
+from .normalize import hash_formulas, html_unescape_formula, html_escape_formula
 from .parser import FormulaParser
 from .security import FormulaValidator
 from .topo import DependencyGraph
@@ -215,6 +217,23 @@ class FormulaEngineCore:
         deterministic: bool = True,
         zero_division_policy: Optional[str] = None,
     ):
+        # ── Gỡ HTML entity / ký tự lạ MỘT LẦN, ngay cửa vào engine ────────────
+        # VÌ SAO phải ở ĐÂY (chứ không chỉ ở parser): DependencyGraph.
+        # build_from_exprs dò định danh bằng regex trên CHÍNH chuỗi này. "a &gt; b"
+        # chứa định danh "gt"; công thức/biến nào tên gt/lt/amp/quot/nbsp sẽ sinh
+        # cạnh phụ thuộc MA ⇒ sai thứ tự tính ⇒ sai số IM LẶNG.
+        # Đặt ở __init__ để phủ MỌI đường vào FormulaEngine (variable_resolver,
+        # formula_table_api, table_formula_builder, cache restore…) — tất cả đều
+        # đi qua đây. Chốt `&` trong helper khiến công thức sạch đi thẳng, không
+        # đổi hash, không đổi bytecode cache key.
+        # ⛔ Chỉ gỡ ở phần `formula`; `name` là khoá khớp DAG nên giữ nguyên.
+        _clean_formulas: List[Dict[str, Any]] = []
+        for _f in formulas:
+            if isinstance(_f, dict) and isinstance(_f.get("formula"), str):
+                _f = {**_f, "formula": html_unescape_formula(_f["formula"])}
+            _clean_formulas.append(_f)
+        formulas = _clean_formulas
+
         # Basic setup
         self._formulas = formulas
         self._meta = meta
@@ -249,6 +268,9 @@ class FormulaEngineCore:
 
         self._default = default_value
         self._last_errors: Dict[str, str] = {}
+        # Cảnh báo (assertion severity=WARNING) của lần calculate gần nhất —
+        # song song với _last_errors.
+        self._last_warnings: List["AssertionViolation"] = []
 
         # Import BASE_FUNCS here to avoid circular import
         from .funcs.registry import BASE_FUNCS
@@ -418,7 +440,10 @@ class FormulaEngineCore:
         recalculate_full(). Sửa self._zero_division_policy là đủ cho MỌI nơi
         gọi engine — không cần sửa các hàm gọi khác (calculate_batch, explain,
         FormulaEngineTrace, FormulaEngineAudit, calculate_safe...)."""
-        formula_text = self._original_expr.get(name, "")
+        # `formula_text` ở đây chỉ dùng để HIỂN THỊ (nhúng vào thông báo, gắn vào
+        # FormulaError/FormulaZeroDivisionError) — escape một lần tại đây cho mọi
+        # nhánh, ⛔ không đụng `_original_expr` gốc.
+        formula_text = html_escape_formula(self._original_expr.get(name, ""))
         policy = self._zero_division_policy
 
         if policy == "allow":
@@ -631,6 +656,7 @@ class FormulaEngineCore:
         obj._assertions = {}
         obj._groups = {}
         obj._last_errors = {}
+        obj._last_warnings = []
         obj._graph = None  # Not serialized; rebuild if needed
         obj._parser = None  # Not serialized; created lazily if needed
         obj._eval_globals = dict(obj._runtime_env)
@@ -662,17 +688,107 @@ class FormulaEngineCore:
     def last_errors(self) -> Dict[str, str]:
         """Trả về dict {formula_name: error_message} của lần calculate gần nhất."""
         return self._last_errors.copy()
-    
+
+    @property
+    def last_warnings(self) -> List[AssertionViolation]:
+        """Danh sách cảnh báo (assertion severity=WARNING) của lần calculate gần
+        nhất — SONG SONG với `last_errors`, theo đúng khuôn
+        `get_zero_division_warnings()`. Lõi cũ chưa có property này thì nơi gọi
+        dùng getattr(engine, "last_warnings", []) để tương thích ngược."""
+        return list(self._last_warnings)
+
+    def _ensure_parser(self) -> FormulaParser:
+        """Parser có thể là None khi engine được phục hồi từ cache bytes
+        (`from_cache_bytes` cố tình không serialize parser) — dựng lại khi cần."""
+        if self._parser is None:
+            _eff = getattr(self, "_max_iterable_size", None) or 2 ** 31
+            self._parser = FormulaParser(
+                self._runtime_env, self._max_subscript_depth or 5, _eff
+            )
+        return self._parser
+
     def add_assertion(self, assertion: Assertion):
-        """Add runtime assertion"""
-        tree = ast.parse(assertion.expr, mode="eval")
-        from .parser import IfCallRewriter
-        tree = IfCallRewriter().visit(tree)
-        ast.fix_missing_locations(tree)
-        from .security import SecurityValidator
-        SecurityValidator(self._max_subscript_depth, self._max_iterable_size).visit(tree)
-        assertion._compiled = compile(tree, f"<assertion:{assertion.name}>", "eval")
+        """Add runtime assertion.
+
+        VÌ SAO đổi sang self._ensure_parser(): trước đây chỗ này tự
+        `ast.parse(expr)` + IfCallRewriter + SecurityValidator, tức là THIẾU 3
+        chốt so với đường parse công thức của lõi:
+          • normalize_formula (%, <>, '=' → '==', chuẩn hoá tên hàm)
+          • DotToSubscriptTransformer (snap.total)
+          • _validate_genexp + _validate_functions (WHITELIST hàm)
+        Biểu thức assertion là đầu vào từ cấu hình ⇒ phải đi qua ĐÚNG cùng cơ chế
+        an toàn như công thức, ⛔ không parse/eval chuỗi trần.
+        """
+        tree = self._ensure_parser().parse(assertion.expr)
+        assertion._compiled = self._ensure_parser().compile(
+            tree, f"<assertion:{assertion.name}>"
+        )
         self._assertions[assertion.name] = assertion
+
+    def _run_assertions(self, local: Dict[str, Any]) -> None:
+        """Chạy toàn bộ assertion sau khi đã tính xong các công thức.
+
+        VÌ SAO ghi nhận thay vì luôn raise: `assertions` đã được HỨA ở 3 nơi
+        (EngineConfig.assertions, ChildTableConfig.assertions, và
+        CalculationResult.warnings mô tả "Cảnh báo assertion severity=WARNING")
+        nhưng chưa bao giờ chạy. Bật lên mà raise thẳng sẽ làm đổ mọi luồng đang
+        chạy khoẻ mạnh chỉ vì ai đó thêm 1 assertion. Nên:
+          • WARNING → gom vào `last_warnings`
+          • ERROR   → gom vào `last_errors`; CHỈ raise khi on_error='raise'
+        ⛔ KHÔNG BAO GIỜ ghi đè giá trị đã tính — đổi giá trị sẽ làm sai số của
+        mọi công thức phía sau (đúng thứ mà tính năng này phải bảo vệ).
+        """
+        if not self._assertions:
+            return
+
+        for assertion in self._assertions.values():
+            code = getattr(assertion, "_compiled", None)
+            if code is None:
+                continue
+            # `depends_on` (nếu có) là hợp đồng tường minh: assertion chỉ có ý
+            # nghĩa khi các biến đó đã có mặt. Thiếu ⇒ bỏ qua thay vì báo lỗi oan.
+            if assertion.depends_on and not all(d in local for d in assertion.depends_on):
+                continue
+            try:
+                ok = eval(code, self._eval_globals, local)
+            except FormulaBudgetExceeded:
+                raise
+            except NameError:
+                # Assertion nhắc tới biến không có trong context (thường là công
+                # thức phía trước đã lỗi nên không sinh ra giá trị). Đây KHÔNG
+                # phải assertion thất bại ⇒ bỏ qua, ⛔ không đổ lỗi cho người dùng.
+                continue
+            except Exception as e:
+                self._last_warnings.append(AssertionViolation(
+                    assertion_name=assertion.name,
+                    expr=assertion.expr,
+                    message=f"{assertion.message} (không chạy được: {e})",
+                    severity=AuditLevel.WARNING,
+                ))
+                continue
+
+            if ok:
+                continue
+
+            violation = AssertionViolation(
+                assertion_name=assertion.name,
+                expr=assertion.expr,
+                message=assertion.message,
+                severity=assertion.severity,
+            )
+            if assertion.severity == AuditLevel.WARNING:
+                self._last_warnings.append(violation)
+            else:
+                self._last_errors[assertion.name] = violation.message
+                if self._mode == MODE_RAISE:
+                    # FormulaAssertionError đã có sẵn trong errors.py nhưng chưa
+                    # nơi nào dùng — dùng nó thay vì đẻ kiểu lỗi mới.
+                    raise FormulaAssertionError(
+                        f"Assertion '{assertion.name}' thất bại: "
+                        f"{assertion.message} "
+                        f"(expr: {html_escape_formula(assertion.expr)})",
+                        [violation],
+                    )
 
     def _make_validator(self) -> "FormulaValidator":
         return FormulaValidator(self._runtime_env.keys())
@@ -769,6 +885,7 @@ class FormulaEngineCore:
         _max_ops = self.max_operations
 
         self._last_errors = {}
+        self._last_warnings = []
         for name in _topo:
             if _max_ops is not None:
                 _consume()
@@ -789,12 +906,16 @@ class FormulaEngineCore:
                 else:  # MODE_RAISE
                     raise FormulaError(
                         f'Evaluation failed for {repr(name)}',
-                        field_name=name, formula=_original.get(name),
+                        field_name=name,
+                        formula=html_escape_formula(_original.get(name, "")),
                         error=e, context=local, code=ErrorCode.INVALID_TYPE) from e
         if self._rounding_policy:
             for fld, policy in self._rounding_policy.items():
                 if fld in local:
                     local[fld] = round(local[fld], policy.get('decimals', 0))
+        # Assertion chạy SAU khi mọi công thức đã có giá trị — và chỉ GHI NHẬN,
+        # không sửa `local` (xem _run_assertions).
+        self._run_assertions(local)
         return {name: local[name] for name in _topo}
 
     def calculate_batch(
@@ -885,7 +1006,7 @@ class FormulaEngineCore:
                     raise FormulaError(
                         f"Evaluation failed for '{name}'",
                         field_name=name,
-                        formula=self._original_expr.get(name),
+                        formula=html_escape_formula(self._original_expr.get(name, "")),
                         error=e,
                         context=ictx._ctx,
                         code=ErrorCode.INVALID_TYPE,
@@ -960,7 +1081,7 @@ class FormulaEngineCore:
                     raise FormulaError(
                         f"Evaluation failed for '{name}'",
                         field_name=name,
-                        formula=self._original_expr.get(name),
+                        formula=html_escape_formula(self._original_expr.get(name, "")),
                         error=e,
                         context=ictx._ctx,
                         code=ErrorCode.INVALID_TYPE,
@@ -1012,7 +1133,7 @@ class FormulaEngineCore:
                     raise FormulaError(
                         f"Evaluation failed for '{name}'",
                         field_name=name,
-                        formula=self._original_expr.get(name),
+                        formula=html_escape_formula(self._original_expr.get(name, "")),
                         error=e,
                         context=ictx._ctx,
                         code=ErrorCode.INVALID_TYPE,
@@ -1030,6 +1151,27 @@ class FormulaEngineCore:
         ictx._engine_hash = self._hash
         ictx._last_updated_at = datetime.now(timezone.utc).isoformat()
         return dict(ictx._outputs)
+
+    # ------------------------------------------------------------------
+    # DAG accessors — API CÔNG KHAI cho lớp ngoài
+    # ------------------------------------------------------------------
+    # VÌ SAO thêm: trước đây lớp ngoài (FlexibleFormulaEngine.get_dependency_graph)
+    # phải chọc thẳng vào `eng._deps_cache` / `eng._topo_order` — thuộc tính RIÊNG
+    # của lớp này. Đổi cấu trúc bên trong là lớp ngoài vỡ im lặng. Đi qua accessor
+    # thì chỉ cần giữ đúng chữ ký ba hàm này.
+
+    @property
+    def topo_order(self) -> List[str]:
+        """Thứ tự tính toán đã sắp xếp topo."""
+        return list(getattr(self, "_topo_order", []))
+
+    def deps_of(self, name: str) -> Set[str]:
+        """Các node mà `name` phụ thuộc TRỰC TIẾP (cha của `name`)."""
+        return set((getattr(self, "_deps_cache", None) or {}).get(name, ()))
+
+    def dependency_edges(self) -> Dict[str, List[str]]:
+        """Toàn bộ cạnh DAG (đã sắp xếp): {node: [node_phụ_thuộc, ...]}."""
+        return {name: sorted(self.deps_of(name)) for name in self.topo_order}
 
     def get_affected_nodes(self, changed_inputs: Set[str]) -> Set[str]:
         formula_names = set(self._topo_order)

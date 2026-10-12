@@ -17,7 +17,7 @@ from .types import (
 )
 from .errors import FormulaError, ErrorCode, _error_type_slug
 from .snapshot import SnapshotManager
-from .normalize import hash_dict
+from .normalize import hash_dict, html_escape_formula
 from .topo import topo_sort, topo_sort_with_info, topo_sort_data, topo_sort_flat
 from .topo import scc_topo_sort, scc_topo_sort_with_info, scc_topo_sort_data, scc_topo_sort_flat
 from .allocation import allocate, allocate_inplace, allocate_fast, AllocationResult, AllocTuple
@@ -52,8 +52,26 @@ class FormulaEngine(FormulaEngineAudit):
         field: str,
         inputs: Dict[str, Any],
         strict: Optional[bool] = None,
+        escape_html: bool = False,
     ) -> ExplainResult:
-        """Explain how a formula field is calculated."""
+        """Explain how a formula field is calculated.
+
+        escape_html: escape `step.formula` thành chuỗi an toàn cho HTML.
+        MẶC ĐỊNH TẮT (trả bản RAW) và đây là chủ ý — ⛔ escape hai lần là lỗi
+        hiển thị thật, không phải chuyện thẩm mỹ:
+
+          • formula_builder.js vốn đã escape MỘT lần bằng `_esc()` trước khi đổ
+            vào innerHTML (xem `_actExplain`). Escape thêm ở đây nữa thì chuỗi
+            `a > b` thành `a &amp;gt; b` và người dùng ĐỌC THẤY `a &gt; b` —
+            đúng thứ mà lớp gỡ entity ở cửa vào vừa dọn xong.
+          • Công thức LƯU đã là bản người dùng nhập (entity đã gỡ ở cửa vào),
+            nên callers không escape cũng KHÔNG sai: Jinja print format in ra
+            `a > b`.
+
+        Chuẩn của cả lớp này: escape ĐÚNG MỘT LẦN, ở lớp NGOÀI CÙNG của đường
+        hiển thị. Ai render thẳng ra HTML mà không tự escape (template in ấn,
+        markdown) thì truyền escape_html=True.
+        """
         if field not in self._original_expr:
             raise FormulaError(
                 f"Field '{field}' không phải formula name. "
@@ -95,7 +113,8 @@ class FormulaEngine(FormulaEngineAudit):
             dep_vals = {d: merged.get(d) for d in sorted(direct_deps)}
             steps.append(ExplainStep(
                 name=name,
-                formula=self._original_expr.get(name, ""),
+                formula=html_escape_formula(self._original_expr.get(name, ""))
+                if escape_html else self._original_expr.get(name, ""),
                 value=merged.get(name),
                 deps=dep_vals,
                 depth=depth_map.get(name, 0),
@@ -118,8 +137,9 @@ class FormulaEngine(FormulaEngineAudit):
         self,
         inputs: Dict[str, Any],
         strict: Optional[bool] = None,
+        escape_html: bool = False,
     ) -> Dict[str, ExplainResult]:
-        """Explain all formula fields."""
+        """Explain all formula fields. Xem `explain` về tham số escape_html."""
         full_result = self.calculate(inputs, strict=strict)
         merged = {**inputs, **full_result}
 
@@ -156,7 +176,8 @@ class FormulaEngine(FormulaEngineAudit):
                 dep_vals = {d: merged.get(d) for d in sorted(direct_deps)}
                 steps.append(ExplainStep(
                     name=name,
-                    formula=self._original_expr.get(name, ""),
+                    formula=html_escape_formula(self._original_expr.get(name, ""))
+                    if escape_html else self._original_expr.get(name, ""),
                     value=merged.get(name),
                     deps=dep_vals,
                     depth=depth_map.get(name, 0),

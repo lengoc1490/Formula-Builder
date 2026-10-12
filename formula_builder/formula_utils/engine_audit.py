@@ -98,6 +98,9 @@ class FormulaEngineAudit(FormulaEngineTrace):
 
             node = TraceNode(
                 name=node_name,
+                # ⛔ RAW: TraceNode là DỮ LIỆU cây audit (log, so khớp, dựng lại),
+                # không phải HTML. Escape ở đây sẽ thành escape HAI LẦN với mọi
+                # caller có tự escape khi hiển thị.
                 formula=self._original_expr.get(node_name, ""),
                 value=log_entry["outputs"].get(node_name),
                 deps={d: log_entry["outputs"].get(d, log_entry["inputs"].get(d)) for d in deps},

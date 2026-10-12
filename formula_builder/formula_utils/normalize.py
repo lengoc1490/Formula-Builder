@@ -1,9 +1,136 @@
+import html
 import re
 import hashlib
 import json
 from typing import Any, Dict, List, Set, Optional, Tuple, Union
 
 _PERCENT_RE = re.compile(r'(?<!\w)(\d+(?:\.\d+)?)\s*%')
+
+
+# ----------------------------------------------------------------------
+# HTML entity / ký tự lạ — dán từ web, Word, hoặc đi qua đường HTML
+# ----------------------------------------------------------------------
+# VÌ SAO cần lớp này (không phải chuyện thẩm mỹ):
+#   1. Frappe escape > < & " ' khi hiển thị / khi công thức đi qua HTML.
+#      Công thức "a > b" tới engine thành "a &gt; b" ⇒ SyntaxError khi eval.
+#   2. NGUY HIỂM HƠN: DependencyGraph.build_from_exprs dò định danh bằng regex
+#      [a-zA-Z_]\w*. Chuỗi "a &gt; b" chứa định danh "gt"; "&lt;" chứa "lt";
+#      "&amp;" chứa "amp"; "&quot;" chứa "quot"; "&nbsp;" chứa "nbsp". Nếu có
+#      công thức/biến nào trùng các tên đó ⇒ SINH CẠNH PHỤ THUỘC MA ⇒ sai thứ
+#      tự tính ⇒ sai số IM LẶNG. Vì vậy phải gỡ TRƯỚC bước dò phụ thuộc.
+#   3. "&quot;qty&quot;" không khớp mẫu chuỗi trong nháy của build_from_exprs
+#      nên bị coi là định danh trần.
+#   4. html.unescape("a&nbsp;+&nbsp;b") trả U+00A0 — eval() ném
+#      "SyntaxError: invalid non-printable character U+00A0". Nháy cong “ ” ‘ ’
+#      dán từ Word cũng phá literal.
+_WEIRD_CHAR_RE = re.compile(
+    "[   -   　"      # khoảng trắng Unicode
+    "​‌‍﻿"                           # zero-width + BOM
+    "“”„‟‘’‚‛]"  # nháy cong
+)
+
+_WEIRD_CHAR_MAP: Dict[str, str] = {
+    # nháy kép cong → nháy kép thẳng
+    "“": '"', "”": '"', "„": '"', "‟": '"',
+    # nháy đơn cong → nháy đơn thẳng
+    "‘": "'", "’": "'", "‚": "'", "‛": "'",
+    # zero-width / BOM → xoá hẳn (vô hình nhưng phá token)
+    "​": "", "‌": "", "‍": "", "﻿": "",
+    # khoảng trắng Unicode → space thường
+    " ": " ", " ": " ", " ": " ", " ": " ", "　": " ",
+}
+for _cp in range(0x2000, 0x200B):     # EN QUAD … HAIR SPACE
+    _WEIRD_CHAR_MAP[chr(_cp)] = " "
+
+
+# charref SỐ dài quá ngưỡng `sys.set_int_max_str_digits` (mặc định 4300 chữ số)
+# làm `html.unescape` ném ValueError NGAY khi đổi chuỗi sang int — trước cả bước
+# kiểm giá trị có nằm trong Unicode hay không. Hai việc phải làm trước khi gỡ
+# lại entity, để MỘT charref hỏng ⛔ không tắt luôn việc gỡ cho cả công thức:
+#   • charref quá dài ⇒ thay U+FFFD (chắc chắn ngoài dải: 0x10FFFF chỉ 7 chữ số);
+#   • charref nhiều số 0 vô nghĩa ⇒ bỏ số 0 (giá trị ⛔ không đổi: "&#000…65;"
+#     vẫn là 'A', mà chuỗi thì ngắn lại, ⛔ không còn chạm ngưỡng int()).
+# ⛔ KHÔNG `int()` ở đây — mọi phép đo đều trên ĐỘ DÀI, nên ⛔ không chạm lại
+# đúng cái ngưỡng vừa làm `html.unescape` ném lỗi.
+# ⛔ Cố ý KHÔNG đụng charref ngoài dải nhưng NGẮN (vd "&#99999999;"): lượt gỡ lại
+# phải hành xử Y HỆT `html.unescape` bình thường (nó giữ nguyên literal đó).
+_MAX_REF_DIGITS = 20              # 20 chữ số ≈ 10^20 ≫ 0x10FFFF ⇒ chắc chắn vô hiệu
+_UNICODE_REPLACEMENT = "\ufffd"
+_RE_NUMERIC_REF = re.compile(r"&#(\d+);")
+
+
+def _neutralise_oversize_numeric_ref(m: "re.Match") -> str:
+    """Làm sạch charref SỐ hỏng để lượt gỡ entity lại chạy được."""
+    digits = m.group(1)
+    sig = digits.lstrip("0") or "0"
+    if len(sig) > _MAX_REF_DIGITS:
+        return _UNICODE_REPLACEMENT
+    if sig != digits:
+        return f"&#{sig};"
+    return m.group(0)
+
+
+def html_unescape_formula(expr: str) -> str:
+    """Gỡ HTML entity + ký tự lạ của công thức ở CỬA VÀO của engine.
+
+    Nguyên tắc: giá trị LƯU giữ RAW, chỉ escape khi chuỗi đi RA giao diện.
+    Nhờ có hàm này ở cửa vào, escape ở cửa ra là an toàn vòng tròn
+    (escape → lưu → đọc lại → unescape ra đúng bản gốc).
+
+    Quy trình:
+      1. Chốt nhanh — công thức sạch (không '&', không ký tự lạ) trả về Y NGUYÊN:
+         giữ hiệu năng cho hot path (engine parse mọi công thức) và tránh mọi rủi
+         ro biến đổi ngoài ý muốn trên công thức vốn đã đúng.
+      2. html.unescape — MỘT LƯỢT DUY NHẤT. ⛔ KHÔNG lặp tới khi hết entity:
+         lặp sẽ phá ca người dùng cố ý viết literal "&gt;" trong chuỗi.
+      3. Chuẩn hoá ký tự lạ (phần chống SyntaxError thật).
+
+    ⛔ KHÔNG gọi hàm này lên TÊN công thức (`name`) — tên là khoá để khớp DAG,
+    không phải biểu thức. Chỉ gọi lên phần `formula`.
+    """
+    if not isinstance(expr, str) or not expr:
+        return expr
+
+    if "&" not in expr and _WEIRD_CHAR_RE.search(expr) is None:
+        return expr
+
+    if "&" in expr:
+        try:
+            expr = html.unescape(expr)
+        except ValueError:
+            # Đường tới đây DUY NHẤT là charref SỐ khổng lồ (> ngưỡng
+            # `sys.set_int_max_str_digits`, mặc định 4300 chữ số): `int()` ném lỗi
+            # trước khi kịp kiểm dải Unicode.
+            # ✅[V] ⛔ KHÔNG phải vì '&' trần: "AT&T", "a&b", "&&", "&#", "&zzz;",
+            # "&gt" … đều trả về bình thường, ⛔ không ném (đo 2026-10-12 trên
+            # CPython 3.10.12→3.14; đọc mã nguồn 5 nhánh — `return '&' + s`).
+            # Phải vô hiệu charref hỏng rồi gỡ entity LẠI: nếu bỏ qua cả chuỗi thì
+            # "&gt;" nằm CÙNG công thức cũng ⛔ không được gỡ ⇒ công thức sai IM LẶNG
+            # (đúng loại lỗi mà lớp này sinh ra để chặn).
+            try:
+                expr = html.unescape(
+                    _RE_NUMERIC_REF.sub(_neutralise_oversize_numeric_ref, expr)
+                )
+            except ValueError:
+                pass  # cùng lắm giữ nguyên — thà ⛔ không gỡ còn hơn vỡ
+
+    if _WEIRD_CHAR_RE.search(expr) is not None:
+        expr = _WEIRD_CHAR_RE.sub(
+            lambda m: _WEIRD_CHAR_MAP.get(m.group(0), " "), expr
+        )
+    return expr
+
+
+def html_escape_formula(expr: str) -> str:
+    """Escape công thức ở CỬA RA giao diện (HTML).
+
+    Chỉ dùng cho chuỗi công thức hiển thị cho người dùng — ⛔ KHÔNG áp lên số/
+    giá trị đã tính, ⛔ KHÔNG áp lên giá trị ghi xuống DB, ⛔ KHÔNG áp hai lần
+    trên cùng một chuỗi (nếu hàm này gọi hàm khác thì chỉ escape ở lớp ngoài cùng).
+    """
+    if not isinstance(expr, str) or not expr:
+        return expr
+    return html.escape(expr, quote=True)
 
 _LOGIC_REMAP: Dict[str, str] = {
     'and': 'and_',
@@ -28,6 +155,11 @@ def normalize_formula(expr: str, canonical_names: frozenset) -> str:
         expr: Công thức gốc (string)
         canonical_names: Tên hàm/variable chuẩn hóa (frozenset)
     """
+    # Gỡ HTML entity TRƯỚC mọi phép thay thế khác — thứ tự này quan trọng:
+    # "&lt;&gt;" phải thành "<>" rồi mới được nhận diện thành "!="; còn "<" ">"
+    # "&gt;=" chỉ đúng sau khi entity đã được giải.
+    expr = html_unescape_formula(expr)
+
     expr = _PERCENT_RE.sub(r'(\1/100)', expr)
 
     lower_map: Dict[str, str] = {}

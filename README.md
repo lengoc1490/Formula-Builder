@@ -1508,6 +1508,8 @@ formula_builder.formulaDialog.open(schema, { initialData: {...} })
 
 This is a higher-level engine that orchestrates **multiple child tables + global formulas** in a single DAG calculation. It bridges the raw `FormulaEngine` with real-world ERP documents.
 
+> 📘 **Full feature & usage guide (tiếng Việt): [`docs/flexible_formula_engine.md`](docs/flexible_formula_engine.md)** — kiến trúc, hai chế độ tính, **số lượt tính (1 hay 2 theo cấu hình)**, ví dụ chạy được, ràng buộc, xử lý HTML entity, và **§6** (header đọc `output_field` của dòng: nay chạy được nhưng vẫn **giòn** — ưu tiên tham chiếu biến dòng).
+
 ### Data Structures
 
 **`ChildTableConfig`** — Configuration for one child table:

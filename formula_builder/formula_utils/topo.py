@@ -9,12 +9,44 @@ from typing import Dict, List, Set, Any, Tuple, Callable, Optional
 from dataclasses import dataclass
 
 from .errors import FormulaError, ErrorCode
+from .normalize import html_unescape_formula
 from .types import TopoSortResult
 
 # Pre-compiled regex for fast identifier extraction (v31 optimization)
 _RE_STRING = re.compile(r"""(?:"[^"]*"|'[^']*')""")
 _RE_ATTR = re.compile(r'\.[a-zA-Z_]\w*')        # attribute access: .field
 _RE_IDENTIFIER = re.compile(r'[a-zA-Z_]\w*')
+
+
+def extract_identifiers(expr: str) -> Set[str]:
+    """Định danh trong biểu thức, sau khi gỡ HTML entity + bỏ string literal + bỏ .attr.
+
+    Đây là ĐƠN VỊ DÒ ĐỊNH DANH DUY NHẤT của cả hệ thống, tách ra công khai
+    (chứ không để nội tuyến trong `build_from_exprs`) vì có ≥2 nơi cần dò y hệt
+    nhau: dựng cạnh DAG và phát hiện công thức ĐỌC BẢNG DÒNG
+    (``sum(r.get('amount',0) for r in items)``). Nếu hai nơi tự cài lại regex,
+    chúng trôi lệch nhau lúc nào không biết, và hậu quả là **sai số im lặng**:
+    thứ tự tính thì theo một bộ cạnh, còn việc phát hiện "cần tính lại" lại theo
+    bộ khác.
+
+    Ba bước làm sạch, ĐÚNG thứ tự này:
+
+    1. ``html_unescape_formula`` — phải chạy TRƯỚC mọi bước dò. Nếu không,
+       ``a &gt; b`` khai báo định danh ``gt`` (và ``&lt;``→``lt``, ``&amp;``→
+       ``amp``, ``&quot;``→``quot``, ``&nbsp;``→``nbsp``); công thức nào trùng
+       tên đó sẽ sinh CẠNH PHỤ THUỘC MA ⇒ sai thứ tự tính.
+    2. Bỏ string literal — tránh nhầm ``'NC'`` với biến ``NC``.
+    3. Bỏ ``.attr`` — tránh nhầm ``snap.total`` thành phụ thuộc vào ``total``
+       (chỉ ``snap`` mới là tham chiếu biến).
+
+    ⚠️ Trả về TẤT CẢ định danh (kể cả tên hàm, từ khoá trong genexp) — nơi gọi
+    tự giao với tập tên nó quan tâm. Giữ nguyên như vậy để hành vi trùng khớp
+    tuyệt đối với bản cũ của `build_from_exprs`.
+    """
+    expr = html_unescape_formula(expr)       # Bước 0: gỡ entity/ký tự lạ
+    clean = _RE_STRING.sub('""', expr)       # Bước 1: xóa string literals
+    clean = _RE_ATTR.sub('', clean)          # Bước 2: xóa .field
+    return set(_RE_IDENTIFIER.findall(clean))
 
 
 # ============================================================================
@@ -59,6 +91,17 @@ class DependencyGraph:
         2. Strip attribute access (.field) → tránh nhầm snap.total thành
            dependency vào "total" (chỉ "snap" mới là variable reference)
         3. Extract identifiers còn lại và match với known formula names
+        4. Gỡ HTML entity TRƯỚC khi dò — nếu không, "a &gt; b" sẽ khai báo định
+           danh "gt" (và "&lt;"→"lt", "&amp;"→"amp", "&quot;"→"quot",
+           "&nbsp;"→"nbsp"); công thức nào trùng tên đó sẽ sinh CẠNH PHỤ THUỘC MA
+           ⇒ sai thứ tự tính ⇒ sai số im lặng. Chốt `&` bên trong helper khiến
+           bước này gần như miễn phí với công thức sạch.
+
+        VÌ SAO 4 bước này nằm ở `extract_identifiers()` chứ không viết thẳng ở
+        đây: nơi khác cũng phải dò định danh theo ĐÚNG cách này (xem
+        `FlexibleFormulaEngine` — phát hiện công thức đọc bảng dòng). Hai bản
+        cài song song sẽ trôi lệch nhau ⇒ thứ tự tính một đằng, phát hiện một
+        nẻo ⇒ sai số im lặng.
         """
         # Add all nodes
         for name in exprs:
@@ -66,9 +109,7 @@ class DependencyGraph:
 
         # Build edges — purify text first, then extract identifiers
         for name, expr in exprs.items():
-            clean = _RE_STRING.sub('""', expr)   # Bước 1: xóa string literals (tránh 'NC' → biến NC)
-            clean = _RE_ATTR.sub('', clean)       # Bước 2: xóa .field (tránh snap.total → dep vào total)
-            identifiers = set(_RE_IDENTIFIER.findall(clean))
+            identifiers = extract_identifiers(expr)
             for dep in identifiers & self.nodes:
                 self.add_edge(dep, name)  # Bao gồm self-reference (a = a + 1 là cycle thật)
 

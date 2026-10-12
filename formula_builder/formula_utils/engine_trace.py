@@ -33,6 +33,10 @@ class FormulaEngineTrace(FormulaEngineCore):
         for name in trace_fields & set(self._topo_order):
             deps = {dep: merged.get(dep) for dep in self._deps_cache.get(name, set())}
             trace_data[name] = {
+                # ⛔ Giữ RAW: đây là DỮ LIỆU trace (log, so khớp, hiển thị lại),
+                # không phải HTML. Công thức đã được gỡ entity ngay ở cửa vào
+                # engine nên bản raw vốn đã là chuỗi người dùng nhập. Escape ở
+                # đây sẽ thành escape HAI LẦN với mọi caller có tự escape.
                 "formula": self._original_expr.get(name, ""),
                 "deps": deps,
                 "result": result.get(name)
@@ -81,6 +85,7 @@ class FormulaEngineTrace(FormulaEngineCore):
         for name in trace_fields & set(self._topo_order):
             deps = {dep: ictx._ctx.get(dep) for dep in self._deps_cache.get(name, set())}
             trace_data[name] = {
+                # ⛔ RAW — xem giải thích ở trace() phía trên.
                 "formula": self._original_expr.get(name, ""),
                 "deps": deps,
                 "result": ictx._outputs.get(name),

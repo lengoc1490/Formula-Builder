@@ -55,6 +55,8 @@ from .normalize import (
     safe_str,
     hash_formulas,
     hash_dict,
+    html_unescape_formula,
+    html_escape_formula,
 )
 
 from .funcs.registry import BASE_FUNCS
@@ -209,6 +211,8 @@ __all__ = [
     "hash_formulas",
     "hash_dict",
     "normalize_formula",
+    "html_unescape_formula",
+    "html_escape_formula",
     "match_criteria",
     "safe_str",
     "vlookup",
