@@ -354,7 +354,9 @@ const _ContextBuilder = {
                   "Table","Table MultiSelect"]),
 
   /**
-   * @param {{ frm, childTableField?, cdn?, liveCtx? }} params
+   * @param {{ frm, childTableField?, cdn?, liveCtx?, fieldname? }} params
+   *   fieldname: field đang sửa — App ngoài (vd AlumGlass) đọc để lọc biến
+   *   theo phạm vi field (`only_fields`); lõi không dùng.
    */
   build({ frm, childTableField, cdn, liveCtx } = {}) {
     const SKIP = this._SKIP;
@@ -758,6 +760,10 @@ class AluglassFormulaEditor {
       row_index:          this.opts.row_index,
       line_ref:           this.opts.line_ref,
       formula_set_code:   this.opts.formula_set_code,
+      // Field đang sửa: server dùng để lọc Formula Variable Binding theo
+      // `applies_to_field`. Thiếu key này thì mọi binding có applies_to_field
+      // đều lọt qua (server coi như "caller không cung cấp field").
+      fieldname:          this.opts.current_field || "",
     };
   }
 
@@ -790,6 +796,9 @@ class AluglassFormulaEditor {
       childTableField : this.opts.child_table_field,
       cdn             : this._resolveCdn(),
       liveCtx         : this._liveCtx,
+      // Field đang sửa — AlumGlass đọc để áp `only_fields` của Variable Profile
+      // (biến chỉ gợi ý ở một số field). Thiếu key này thì mọi biến đều hiện.
+      fieldname       : this.opts.current_field || "",
     });
   }
 

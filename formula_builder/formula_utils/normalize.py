@@ -139,12 +139,75 @@ _LOGIC_REMAP: Dict[str, str] = {
 }
 
 # ----------------------------------------------------------------------
+# Bỏ tiền tố `$` của biến toàn cục: $NAME → NAME
+# ----------------------------------------------------------------------
+# VÌ SAO cần: autocomplete của Formula Builder chèn biến global dưới dạng
+# `$TEN` (xem `formula_builder_field.js` — `insert: "$" + v.name`). Nhưng
+# FormulaEngine KHÔNG hiểu `$` — nó chỉ nhận tên trần. Trước bản vá này,
+# `$VAT_RATE` bị đánh giá là syntax error dù cùng nghĩa với `VAT_RATE`.
+#
+# Hai thứ ⛔ KHÔNG được đụng:
+#   1. `$snap.<field>` — cú pháp snapshot, `snap` là tiền tố có nghĩa riêng.
+#   2. Chuỗi trong nháy ('...' / "...") — `'$NAME'` là dữ liệu, không phải biến.
+#      Việc bỏ `$` trong literal sẽ làm đổi giá trị người dùng nhập.
+_DOLLAR_NAME_RE = re.compile(r'\$([A-Za-z_]\w*)')
+
+
+def strip_dollar_prefix(expr: str) -> str:
+    """Đổi `$NAME` → `NAME`, giữ nguyên `$snap.*` và nội dung chuỗi trong nháy.
+
+    Quét từng ký tự thay vì `re.sub` toàn chuỗi để nhận biết được vùng literal
+    (regex thuần không phân biệt được dấu nháy mở/đóng với nháy escape `\\'`).
+    """
+    if not isinstance(expr, str) or '$' not in expr:
+        return expr
+
+    out: list = []
+    i = 0
+    n = len(expr)
+    while i < n:
+        ch = expr[i]
+
+        # Copy nguyên văn chuỗi trong nháy (kể cả ký tự escape)
+        if ch in ('"', "'"):
+            quote = ch
+            out.append(ch)
+            i += 1
+            while i < n:
+                c = expr[i]
+                out.append(c)
+                i += 1
+                if c == '\\':
+                    if i < n:
+                        out.append(expr[i])
+                        i += 1
+                    continue
+                if c == quote:
+                    break
+            continue
+
+        if ch == '$':
+            m = _DOLLAR_NAME_RE.match(expr, i)
+            # `$snap` giữ nguyên — kể cả khi không theo sau bởi '.' (không có
+            # nghĩa khác, và giữ đúng hợp đồng "không đụng $snap").
+            if m and m.group(1) != 'snap':
+                out.append(m.group(1))
+                i = m.end()
+                continue
+
+        out.append(ch)
+        i += 1
+    return ''.join(out)
+
+
+# ----------------------------------------------------------------------
 # normalize_formula
 # ----------------------------------------------------------------------
 
 def normalize_formula(expr: str, canonical_names: frozenset) -> str:
     """
     Chuẩn hóa công thức:
+      - Bỏ tiền tố `$` của biến toàn cục ($NAME → NAME, giữ $snap.*)
       - Chuyển % thành /100
       - Chuyển <> thành !=
       - Chuyển = thành == (mọi dấu = đơn lẻ đều là so sánh)
@@ -159,6 +222,10 @@ def normalize_formula(expr: str, canonical_names: frozenset) -> str:
     # "&lt;&gt;" phải thành "<>" rồi mới được nhận diện thành "!="; còn "<" ">"
     # "&gt;=" chỉ đúng sau khi entity đã được giải.
     expr = html_unescape_formula(expr)
+
+    # Bỏ `$` SAU html_unescape (để `&dollar;NAME` cũng được xử lý) nhưng TRƯỚC
+    # phần trăm/logic — để `$NAME` đi vào nhánh xử lý identifier bình thường.
+    expr = strip_dollar_prefix(expr)
 
     expr = _PERCENT_RE.sub(r'(\1/100)', expr)
 

@@ -271,6 +271,133 @@ def evaluate_formula_set(formula_set_code, extra_context_json=None):
 
 
 # ── SECTION 4: Context ─────────────────────────────────────────────────────
+def _split_field_scope(value) -> List[str]:
+    """Tách phạm vi field (`applies_to_field` / `only_fields`) thành list.
+
+    Chấp nhận list/tuple hoặc chuỗi phân tách bằng `,` / `|`. Bỏ phần tử rỗng,
+    trim, giữ thứ tự xuất hiện (⛔ không dùng set để kết quả ổn định).
+    """
+    if not value:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        parts = list(value)
+    else:
+        parts = _re.split(r"[,|]", str(value))
+    out: List[str] = []
+    for part in parts:
+        part = str(part).strip()
+        if part and part not in out:
+            out.append(part)
+    return out
+
+
+def _merge_field_scope(scope_a, scope_b) -> List[str]:
+    """Hợp phạm vi field của 2 entry trùng tên.
+
+    Luật: RỖNG = không giới hạn ⇒ gộp với bất kỳ phạm vi nào cũng thành không
+    giới hạn (`[]`). Ngược lại lấy hợp, giữ thứ tự (a trước, b sau).
+    """
+    left = _split_field_scope(scope_a)
+    right = _split_field_scope(scope_b)
+    if not left or not right:
+        return []
+    merged = list(left)
+    for fieldname in right:
+        if fieldname not in merged:
+            merged.append(fieldname)
+    return merged
+
+
+def _with_field_scope(entry: dict, scope: List[str]) -> dict:
+    """Trả bản copy của entry với `only_fields` (list) + `applies_to_field` (str).
+
+    Client (AlumGlass `formula_setup.js`) lọc gợi ý theo `only_fields` — context
+    chỉ fetch MỘT lần cho cả form nên mỗi biến phải tự mang phạm vi field của
+    mình, không dựa vào việc server lọc theo fieldname lúc gọi.
+    """
+    out = dict(entry)
+    out["only_fields"] = list(scope)
+    out["applies_to_field"] = "|".join(scope)
+    return out
+
+
+def _dedupe_live_variables(variables: List[dict]) -> List[dict]:
+    """Gộp các entry trùng `name` trong danh sách biến của get_live_context.
+
+    VÌ SAO: nhiều Formula Variable Binding có thể cùng `variable_name` (scope
+    doctype/field khác nhau, hoặc admin tạo trùng). Trước đây danh sách trả
+    thẳng cho UI theo thứ tự, nên entry ĐẦU TIÊN thắng tuyệt đối — kể cả khi
+    binding đó resolve ra `None`, nó vẫn che entry phía sau có giá trị thật.
+
+    Luật giữ:
+      · Ưu tiên entry có giá trị (`value is not None`).
+      · Hoà → giữ entry đầu tiên (ổn định, không đổi thứ tự).
+      · Entry bị bỏ vẫn được resolve (⛔ không xoá binding) — chỉ không lặp lại
+        trong danh sách gợi ý; nguồn bị bỏ ghi vào `duplicate_sources` của
+        entry được giữ để UI/explain giải thích được "vì sao biến này lấy giá
+        trị kia".
+
+    Phạm vi field (`applies_to_field`) của các entry trùng được HỢP lại và lưu
+    vào entry thắng dưới dạng `only_fields` (list) + `applies_to_field`
+    ("a|b") để client lọc tại chỗ (xem `_with_field_scope`).
+    """
+    kept_idx: Dict[str, int] = {}
+    result: List[dict] = []
+    for v in variables:
+        name = v.get("name")
+        if not name:
+            result.append(v)
+            continue
+        idx = kept_idx.get(name)
+        if idx is None:
+            kept_idx[name] = len(result)
+            result.append(v)
+            continue
+
+        prev = result[idx]
+        # Hợp phạm vi field TRƯỚC khi thay/giữ entry — phải tính trên cả 2 phía.
+        scope = _merge_field_scope(
+            prev.get("only_fields") or prev.get("applies_to_field"),
+            v.get("only_fields") or v.get("applies_to_field"),
+        )
+        src = {
+            "source": v.get("source"),
+            "source_type": v.get("source_type"),
+            "value": v.get("value"),
+        }
+        if prev.get("value") is None and v.get("value") is not None:
+            # Entry sau có giá trị thật → thay entry đã giữ, GIỮ NGUYÊN VỊ TRÍ
+            # (result[idx]) để thứ tự gợi ý không đổi.
+            duplicates = list(prev.get("duplicate_sources") or [])
+            duplicates.append({
+                "source": prev.get("source"),
+                "source_type": prev.get("source_type"),
+                "value": prev.get("value"),
+            })
+            v = _with_field_scope(v, scope)
+            v["duplicate_sources"] = duplicates
+            result[idx] = v
+        else:
+            duplicates = list(prev.get("duplicate_sources") or [])
+            duplicates.append(src)
+            prev = _with_field_scope(prev, scope)
+            prev["duplicate_sources"] = duplicates
+            result[idx] = prev
+
+    # Chuẩn hoá phạm vi cho MỌI entry (kể cả binding không trùng tên): client
+    # cần `only_fields` trên từng biến để lọc theo field đang sửa.
+    normalised: List[dict] = []
+    for v in result:
+        if not v.get("name"):
+            normalised.append(v)
+            continue
+        scope = _split_field_scope(
+            v.get("only_fields") or v.get("applies_to_field")
+        )
+        normalised.append(_with_field_scope(v, scope))
+    return normalised
+
+
 @frappe.whitelist()
 def get_live_context(scope_context_json):
     """Read Formula Variable Binding records, resolve them, and return
@@ -335,6 +462,9 @@ def get_live_context(scope_context_json):
                     "source": "global" if is_global else "local",
                     "source_type": b["source_type"],
                     "is_global": is_global,
+                    # Phạm vi field của binding — client lọc gợi ý theo field
+                    # đang sửa (context chỉ fetch 1 lần cho cả form).
+                    "applies_to_field": b.get("applies_to_field") or "",
                 })
             else:
                 variables.append({
@@ -345,6 +475,7 @@ def get_live_context(scope_context_json):
                     "source": "global" if is_global else "local",
                     "source_type": b["source_type"],
                     "is_global": is_global,
+                    "applies_to_field": b.get("applies_to_field") or "",
                 })
 
         # ── 5. Also include current doc scalar fields for convenience ──
@@ -398,6 +529,12 @@ def get_live_context(scope_context_json):
                     })
         except Exception:
             pass
+
+        # ── 7b. Gộp biến trùng tên (binding cùng variable_name) ──
+        # Giữ entry có giá trị; entry bị bỏ ghi vào `duplicate_sources`.
+        # Bindings vẫn resolve đầy đủ ở bước 3 — bước này chỉ làm sạch danh
+        # sách trả cho UI.
+        variables = _dedupe_live_variables(variables)
 
         # ── 8. JSON string for widget backward compat ──
         json_str = json.dumps(

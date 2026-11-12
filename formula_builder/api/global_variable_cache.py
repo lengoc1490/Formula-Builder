@@ -29,6 +29,14 @@ _FIELDS = ["var_name", "constant_value"]
 def get_all_global_variables():
     """Trả list[dict] gồm `var_name`, `constant_value` — đọc qua cache Redis.
 
+    Chỉ lấy record `is_active = 1`. VÌ SAO:
+      · Biến đã tắt không được vào autocomplete (người dùng gõ ra một biến
+        "chết") — và với AlumGlass B1, mọi record trả về đều được ghi vào
+        `inputs`, nên record tắt còn có thể CHE giá trị của system variable
+        cùng tên bằng chuỗi rỗng.
+      · Record `FORMULA`/`DB_QUERY` không có `constant_value` vẫn được trả về
+        (chỉ khi đang bật) — đường này giữ nguyên hành vi cũ.
+
     `expires=True`: khoá này có TTL nên KHÔNG được nhớ vào `frappe.local.cache`
     (xem `frappe/utils/redis_wrapper.py::get_value` — khi Redis miss mà
     `expires=False` thì hàm ghi `None` vào cache cục bộ, và vì `set_value` có
@@ -38,7 +46,9 @@ def get_all_global_variables():
     cached = frappe.cache().get_value(GLOBAL_VARIABLE_CACHE_KEY, expires=True)
     if cached is not None:
         return cached
-    data = frappe.get_all("Formula Global Variable", fields=_FIELDS) or []
+    data = frappe.get_all(
+        "Formula Global Variable", filters={"is_active": 1}, fields=_FIELDS
+    ) or []
     frappe.cache().set_value(
         GLOBAL_VARIABLE_CACHE_KEY, data, expires_in_sec=CACHE_TTL_SECONDS
     )
