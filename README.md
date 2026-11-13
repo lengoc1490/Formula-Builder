@@ -12,6 +12,7 @@
   - [Mục lục](#mục-lục)
   - [1. Giới thiệu](#1-giới-thiệu)
   - [2. Tổng quan tính năng](#2-tổng-quan-tính-năng)
+  - [Tính năng mới v28_14](#tính-năng-mới-v28_14)
   - [3. Kiến trúc tổng thể](#3-kiến-trúc-tổng-thể)
   - [4. Cài đặt](#4-cài-đặt)
   - [5. Cấu trúc thư mục](#5-cấu-trúc-thư-mục)
@@ -165,6 +166,25 @@
 | **AI Suggestions** | Anthropic/Deepseek/ChatGPT integration | `api/formula_builder.py` |
 | **Budget Guard** | max_operations cap on engine evaluation (thay rate limit) | `api/formula_builder.py` |
 | **Caching** | Redis cache cho suggestions, settings, context | `api/settings_cache.py` |
+
+---
+
+## Tính năng mới v28_14
+
+Bản vá trên nhánh `develop` (HEAD `51cb497`, 2026-11-12). ⛔ **Không đổi schema DB** — không cần
+migrate cho Formula Builder; chỉ cần build asset và nạp lại mã Python.
+
+| Thay đổi | Tác dụng |
+|---|---|
+| `$NAME` được chấp nhận | `$VAT_RATE` → `VAT_RATE`; giữ nguyên `$snap.*` và chuỗi trong nháy |
+| `get_live_context` lọc binding theo `applies_to_field` | Chỉ khi scope có `fieldname`; so khớp đúng một fieldname |
+| Biến trả kèm `applies_to_field` / `only_fields` | App ngoài (AlumGlass) tự lọc gợi ý theo field đang sửa |
+| Gộp biến trùng tên | Ưu tiên entry có giá trị, hợp phạm vi field, ghi nguồn bị bỏ vào `duplicate_sources` |
+| `Formula Global Variable` tắt không còn nạp | Lọc `is_active=1`; tránh record tắt che biến cùng tên bằng chuỗi rỗng |
+| Widget gửi `fieldname` | `_scope()` và `_buildCtx()` truyền field đang sửa |
+
+Hướng dẫn đầy đủ (cách cấu hình binding, cách kiểm tra, tương thích ngược, giới hạn):
+**[docs/huong-dan-tinh-nang-moi.md](docs/huong-dan-tinh-nang-moi.md)**
 
 ---
 
