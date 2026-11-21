@@ -37,7 +37,7 @@ app_include_css = [
 ]
 
 app_include_js = [
-    "/assets/formula_builder/js/formula_builder.js?v=30.0.1",
+    "/assets/formula_builder/js/formula_builder.js?v=30.0.2",
     "/assets/formula_builder/js/formula_builder_field.js?v=30.0.1",
     "/assets/formula_builder/js/formula_builder_dialog.js?v=30.0.1",
 ]
