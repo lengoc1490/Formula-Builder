@@ -136,6 +136,7 @@ function makeDocument(state) {
 	const doc = {
 		_overlays: [],
 		_backdrops: [],
+		_modals: [],
 		readyState: "complete",
 		getElementById() {
 			return null;
@@ -146,7 +147,23 @@ function makeDocument(state) {
 		createTextNode() {
 			return {};
 		},
-		querySelector() {
+		querySelector(sel) {
+			const s = String(sel || "");
+			// `_isAnyModalOpen` hỏi ".modal.in, .modal.show, .modal[style*=...]".
+			// So khớp THẬT từng vế để test bắt được việc chỉ phủ 1 đời Bootstrap.
+			if (s.indexOf(".modal") === -1) return null;
+			const hasClass = (el, name) =>
+				new RegExp("(^|\\s)" + name + "(\\s|$)").test(el.className || "");
+			for (const el of doc._modals) {
+				if (s.indexOf(".modal.in") !== -1 && hasClass(el, "in")) return el;
+				if (s.indexOf(".modal.show") !== -1 && hasClass(el, "show")) return el;
+				if (
+					s.indexOf(".modal[style*='display: block']") !== -1 &&
+					String(el.style.display || "").indexOf("block") !== -1
+				) {
+					return el;
+				}
+			}
 			return null;
 		},
 		querySelectorAll(sel) {
@@ -164,11 +181,22 @@ function makeDocument(state) {
 	return doc;
 }
 
+/** Node modal Frappe giả: bsClass = "in" (v14) | "show" (v15) | fade-out. */
+function makeModalNode(kind) {
+	const el = makeElement("div");
+	el.className = "modal";
+	if (kind === "in") el.className = "modal fade in";
+	if (kind === "show") el.className = "modal fade show";
+	if (kind === "fading") el.style.display = "block"; // đang fade-out
+	return el;
+}
+
 // ─────────────────────────────────────────────────────────── stub frappe/DOM
 const state = {
 	timers: [],
 	dialogs: [],
 	confirmCalls: [],
+	focused: [],
 	lastBackdrop: null,
 	doc: null,
 };
@@ -224,8 +252,16 @@ function makeFakeDialogClass() {
 				visibility: "visible",
 				zIndex: "1040",
 			};
-			this.$wrapper = { get: () => this.wrapperEl };
+			this.secondaryEl = makeElement("button");
+			this.secondaryEl.focus = () => state.focused.push(this.secondaryEl);
+			this.$wrapper = {
+				get: () => this.wrapperEl,
+				on: () => this.$wrapper,
+			};
 			state.dialogs.push(this);
+		}
+		get_secondary_btn() {
+			return { get: () => this.secondaryEl };
 		}
 		show() {
 			this.shown = true;
@@ -370,11 +406,20 @@ if (!fb || typeof fb.confirm !== "function") {
 }
 
 function resetWorld() {
+	// Đóng mọi dialog còn mở để nhả bộ đếm modal của helper
+	state.dialogs.forEach((d) => {
+		try {
+			if (typeof d.on_hide === "function") d.on_hide();
+		} catch (e) { /* ignore */ }
+	});
+	flushTimers();
 	state.doc._overlays = [];
 	state.doc._backdrops = [];
+	state.doc._modals = [];
 	state.timers.length = 0;
 	state.dialogs.length = 0;
 	state.confirmCalls.length = 0;
+	state.focused.length = 0;
 	state.lastBackdrop = null;
 	frappe.ui.Dialog = makeFakeDialogClass();
 }
@@ -505,6 +550,20 @@ check("trong overlay ⇒ dựng Dialog (không gọi frappe.confirm), đúng tit
 	eq(opts.secondary_action_label, "Hủy", "nhãn nút phụ");
 	assert(Array.isArray(opts.fields) && opts.fields.length === 1, "phải có 1 field nội dung");
 	eq(opts.fields[0].options, "Xóa toàn bộ công thức?", "nội dung message");
+	eq(opts.no_focus, true, "phải tắt focus tự động của Frappe để tự focus nút Hủy");
+	eq(state.focused.length, 1, "phải focus đúng 1 lần");
+	assert(state.focused[0] === state.dialogs[0].secondaryEl, "phải focus nút phụ (Hủy)");
+});
+
+check("tôn trọng opts.title; không truyền thì mặc định 'Xác nhận'", () => {
+	resetWorld();
+	state.doc._overlays = [makeOverlayNode(1100)];
+	fb.confirm("msg", () => {}, { title: "Xóa nội dung công thức đang soạn?" });
+	eq(state.dialogs[0].opts.title, "Xóa nội dung công thức đang soạn?", "title truyền vào");
+	resetWorld();
+	state.doc._overlays = [makeOverlayNode(1100)];
+	fb.confirm("msg", () => {});
+	eq(state.dialogs[0].opts.title, "Xác nhận", "title mặc định");
 });
 
 check("overlay 1000010 ⇒ modal 1000030, backdrop 1000020", () => {
@@ -583,18 +642,131 @@ check("không tự chạy on_yes/on_no khi chỉ dựng dialog", () => {
 	eq(no, 0);
 });
 
+// ═══════════════════════════════════ D. ESC KHÔNG ĐƯỢC ĐÓNG BUILDER KHI CÓ MODAL
+console.log("\nD. Guard Esc — không mất công thức đang gõ");
+
+check("Esc khi đang mở hộp xác nhận ⇒ builder KHÔNG đóng, chưa chạy gì", () => {
+	resetWorld();
+	state.doc._overlays = [makeOverlayNode(1000010)];
+	let yes = 0;
+	let no = 0;
+	const dlg = fb.confirm("Xóa?", () => yes++, { on_no: () => no++ });
+	assert(fb._isAnyModalOpen() === true, "bộ đếm hộp xác nhận phải báo có modal mở");
+	let closed = 0;
+	const didClose = fb._runEscapeClose(() => closed++);
+	eq(didClose, false, "guard phải chặn");
+	eq(closed, 0, "⛔ được đóng builder");
+	eq(yes, 0, "⛔ được chạy hành động xóa");
+	// Bootstrap tự đóng modal khi Esc (handler của nó gắn trên chính modal)
+	dlg.on_hide();
+	eq(no, 1, "Esc do modal xử lý ⇒ Hủy");
+	eq(yes, 0, "vẫn ⛔ chạy hành động xóa");
+});
+
+check("Esc khi có .modal.in (Frappe v14) ⇒ builder KHÔNG đóng", () => {
+	resetWorld();
+	state.doc._modals = [makeModalNode("in")];
+	let closed = 0;
+	eq(fb._runEscapeClose(() => closed++), false, "guard phải chặn");
+	eq(closed, 0, "⛔ được đóng builder");
+});
+
+check("Esc khi có .modal.show (Frappe v15) ⇒ builder KHÔNG đóng", () => {
+	resetWorld();
+	state.doc._modals = [makeModalNode("show")];
+	let closed = 0;
+	eq(fb._runEscapeClose(() => closed++), false, "guard phải chặn");
+	eq(closed, 0, "⛔ được đóng builder");
+});
+
+check("Esc lúc modal đang fade-out (còn display:block) ⇒ builder KHÔNG đóng", () => {
+	resetWorld();
+	state.doc._modals = [makeModalNode("fading")];
+	let closed = 0;
+	eq(fb._runEscapeClose(() => closed++), false, "guard phải chặn");
+	eq(closed, 0, "⛔ được đóng builder");
+});
+
+check("Esc khi KHÔNG có modal ⇒ builder đóng như cũ", () => {
+	resetWorld();
+	let closed = 0;
+	eq(fb._runEscapeClose(() => closed++), true, "phải cho đóng");
+	eq(closed, 1, "closeDialog phải chạy đúng 1 lần");
+});
+
+check("đóng hộp xác nhận ⇒ nhả bộ đếm modal (Esc sau đó lại đóng được builder)", () => {
+	resetWorld();
+	state.doc._overlays = [makeOverlayNode(1000010)];
+	const dlg = fb.confirm("Xóa?", () => {});
+	assert(fb._isAnyModalOpen() === true, "đang mở");
+	dlg.opts.secondary_action();
+	flushTimers();
+	assert(fb._isAnyModalOpen() === false, "phải nhả bộ đếm sau khi đóng");
+	let closed = 0;
+	eq(fb._runEscapeClose(() => closed++), true);
+	eq(closed, 1);
+});
+
+check("mọi handler Esc cấp `document` đều đi qua _runEscapeClose", () => {
+	const badDocHandlers = [
+		'document.addEventListener("keydown",e=>{ if(e.key==="Escape") close(); },{once:true})',
+		'document.addEventListener("keydown",e=>{ if(e.key==="Escape") closeDialog(); })',
+	];
+	badDocHandlers.forEach((bad) => {
+		assert(source.indexOf(bad) === -1, "còn handler Esc chưa có guard: " + bad);
+	});
+	assert(
+		source.indexOf('const escHandler = (e) => { if (e.key === "Escape") _runEscapeClose(closeDialog); };') !== -1,
+		"escHandler của dialog chính chưa dùng guard"
+	);
+	assert(
+		source.indexOf('this._tourEscHandler = e => { if(e.key==="Escape") _runEscapeClose(abort); };') !== -1,
+		"tour Esc chưa dùng guard"
+	);
+});
+
 // ══════════════════════════════════════════════════ C. CHỖ GỌI TRONG TOÀN APP
 console.log("\nC. Chỗ gọi `_actClear` dùng helper");
 
-check("_actClear không còn gọi thẳng frappe.confirm", () => {
+check("_actClear không còn gọi thẳng frappe.confirm, dùng helper có title", () => {
 	assert(
 		source.indexOf('frappe.confirm("Xóa toàn bộ công thức?"') === -1,
 		"vẫn còn frappe.confirm trực tiếp cho nút Xóa"
 	);
 	assert(
-		source.indexOf('formula_builder.confirm("Xóa toàn bộ công thức?"') !== -1,
+		source.indexOf("formula_builder.confirm(") !== -1,
 		"_actClear chưa chuyển sang formula_builder.confirm"
 	);
+	assert(
+		source.indexOf('title: "Xóa nội dung công thức đang soạn?"') !== -1,
+		"thiếu tiêu đề hộp xác nhận mới"
+	);
+});
+
+check("tooltip nút ✕ nói rõ xóa NỘI DUNG đang soạn", () => {
+	assert(
+		source.indexOf('title="Xóa toàn bộ nội dung đang soạn"') !== -1,
+		"tooltip nút Xóa chưa đổi"
+	);
+	assert(source.indexOf('afb-act-clear"         title="Xóa"') === -1, "tooltip cũ vẫn còn");
+});
+
+check("nội dung xác nhận mới nói rõ không đụng mẫu đã lưu / dữ liệu chứng từ", () => {
+	assert(
+		source.indexOf(
+			"Toàn bộ nội dung trong ô công thức sẽ bị xóa. Mẫu đã lưu và dữ liệu chứng từ không bị ảnh hưởng."
+		) !== -1,
+		"thiếu câu nội dung mới"
+	);
+	assert(
+		source.indexOf('"Xóa toàn bộ công thức?"') === -1,
+		"câu cũ mơ hồ vẫn còn trong file"
+	);
+});
+
+check("⛔ KHÔNG bật confirm_dialog (Enter không được kích hoạt Xóa)", () => {
+	assert(source.indexOf("confirm_dialog: true") === -1, "phát hiện confirm_dialog: true");
+	assert(source.indexOf("confirm_dialog:true") === -1, "phát hiện confirm_dialog:true");
 });
 
 // ══════════════════════════════════════════════════════════════ KẾT QUẢ

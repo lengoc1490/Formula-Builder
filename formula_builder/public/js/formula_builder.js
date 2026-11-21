@@ -879,7 +879,7 @@ class AluglassFormulaEditor {
         <button class="afb-btn afb-act-undo"                 title="Undo">↩</button>
         <button class="afb-btn afb-act-redo"                 title="Redo">↪</button>
         <div class="afb-btn-sep"></div>
-        <button class="afb-btn danger afb-act-clear"         title="Xóa">✕</button>
+        <button class="afb-btn danger afb-act-clear"         title="Xóa toàn bộ nội dung đang soạn">✕</button>
         <button class="afb-btn afb-act-shortcuts"            title="Phím tắt (Ctrl+?)">⌨</button>
         <button class="afb-btn afb-act-findreplace"          title="Tìm & Thay thế (Ctrl+H)">🔎</button>
         <button class="afb-btn afb-act-diff"                 title="So sánh">⊟</button>
@@ -1617,11 +1617,17 @@ class AluglassFormulaEditor {
     if (!this.getValue()) return;
     // Dùng helper thay `frappe.confirm`: trong dialog Formula Builder, modal
     // Bootstrap chuẩn bị overlay tự dựng (z-index 1100) che mất.
-    formula_builder.confirm("Xóa toàn bộ công thức?", () => {
-      this.setValue(""); this.$valbar.html(`<span style="color:var(--afb-text3)">Nhập công thức để bắt đầu...</span>`);
-      this._setPanelContent("result",`<span style="color:var(--afb-text3)">Nhấn ▶ Chạy thử để xem kết quả.</span>`);
-      const sbval = this._q(`#sbval-${this._uid}`); if (sbval) { sbval.textContent = "—"; sbval.className = "afb-statusbar-item"; }
-    }, { yes_label: "Xóa" });
+    // Câu chữ nói rõ CHỈ xoá nội dung ô soạn thảo — không đụng mẫu đã lưu
+    // hay dữ liệu chứng từ (thanh công cụ cũng có nút "Lưu mẫu").
+    formula_builder.confirm(
+      "Toàn bộ nội dung trong ô công thức sẽ bị xóa. Mẫu đã lưu và dữ liệu chứng từ không bị ảnh hưởng.",
+      () => {
+        this.setValue(""); this.$valbar.html(`<span style="color:var(--afb-text3)">Nhập công thức để bắt đầu...</span>`);
+        this._setPanelContent("result",`<span style="color:var(--afb-text3)">Nhấn ▶ Chạy thử để xem kết quả.</span>`);
+        const sbval = this._q(`#sbval-${this._uid}`); if (sbval) { sbval.textContent = "—"; sbval.className = "afb-statusbar-item"; }
+      },
+      { title: "Xóa nội dung công thức đang soạn?", yes_label: "Xóa", no_label: "Hủy" }
+    );
   }
 
   _addHistory(formula, result, success) {
@@ -1792,7 +1798,7 @@ class AluglassFormulaEditor {
     overlay.querySelectorAll("[data-formula]").forEach(btn => btn.addEventListener("click", () => { this.setValue(btn.dataset.formula); closeDialog(); this._setStatus("✓ Đã áp dụng","ok"); }));
     overlay.querySelector(".afb-suggest-close")?.addEventListener("click", closeDialog);
     overlay.addEventListener("click", e => { if (e.target === overlay) closeDialog(); });
-    const onKey = e => { if (e.key === "Escape") closeDialog(); };
+    const onKey = e => { if (e.key === "Escape") _runEscapeClose(closeDialog); };
     document.addEventListener("keydown", onKey);
   }
 
@@ -1884,7 +1890,7 @@ class AluglassFormulaEditor {
     const close = () => { overlay.remove(); document.removeEventListener("keydown", onKey); };
     overlay.querySelector("#sc-close")?.addEventListener("click", close);
     overlay.addEventListener("click", e => { if (e.target === overlay) close(); });
-    const onKey = e => { if (e.key === "Escape") close(); };
+    const onKey = e => { if (e.key === "Escape") _runEscapeClose(close); };
     document.addEventListener("keydown", onKey);
   }
 
@@ -1979,11 +1985,12 @@ class AluglassFormulaEditor {
       const newHtml=diff.filter(d=>d.type!=="del").map(d=>d.type==="add"?`<span class="afb-diff-add">${_esc(d.text)}</span>`:`<span class="afb-diff-same">${_esc(d.text)}</span>`).join("");
       result.innerHTML=`<div class="afb-diff-stats">+${addCount} thêm · -${delCount} xóa</div><div class="afb-diff-cols"><div><div class="afb-diff-col-label" style="color:var(--afb-red)">🗑 Cũ</div><div class="afb-diff-code">${oldHtml}</div></div><div><div class="afb-diff-col-label" style="color:var(--afb-green)">✓ Mới</div><div class="afb-diff-code">${newHtml}</div></div></div>`;
     };
-    const close = () => overlay.remove();
+    const close = () => { document.removeEventListener("keydown", onEsc); overlay.remove(); };
     overlay.querySelector("#diff-run")?.addEventListener("click",run);
     overlay.querySelector("#diff-close")?.addEventListener("click",close);
     overlay.addEventListener("click",e=>{ if(e.target===overlay) close(); });
-    document.addEventListener("keydown",e=>{ if(e.key==="Escape") close(); },{once:true});
+    const onEsc = e => { if(e.key==="Escape") _runEscapeClose(close); };
+    document.addEventListener("keydown", onEsc);
   }
 
   _actSaveTemplate() {
@@ -2007,10 +2014,11 @@ class AluglassFormulaEditor {
     document.body.appendChild(overlay);
     const nameInput = overlay.querySelector("#st-name");
     nameInput?.focus();
-    const close = () => overlay.remove();
+    const close = () => { document.removeEventListener("keydown", onEsc); overlay.remove(); };
     overlay.querySelector("#st-cancel")?.addEventListener("click",close);
     overlay.addEventListener("click",e=>{ if(e.target===overlay) close(); });
-    document.addEventListener("keydown",e=>{ if(e.key==="Escape") close(); },{once:true});
+    const onEsc = e => { if(e.key==="Escape") _runEscapeClose(close); };
+    document.addEventListener("keydown", onEsc);
     overlay.querySelector("#st-save")?.addEventListener("click",() => {
       const name=(nameInput?.value||"").trim();
       if (!name) { nameInput.style.borderColor="#ef4444"; nameInput.focus(); return; }
@@ -2102,7 +2110,7 @@ class AluglassFormulaEditor {
     card.querySelector("#tour-skip")?.addEventListener("click", abort);
     card.querySelector("#tour-prev")?.addEventListener("click", () => this._runTour(steps, index-1, onComplete));
     if (this._tourEscHandler) document.removeEventListener("keydown", this._tourEscHandler);
-    this._tourEscHandler = e => { if(e.key==="Escape") abort(); };
+    this._tourEscHandler = e => { if(e.key==="Escape") _runEscapeClose(abort); };
     document.addEventListener("keydown", this._tourEscHandler);
   }
 
@@ -2306,6 +2314,45 @@ const AFB_CONFIRM_BACKDROP_GAP     = 10;   // backdrop = overlay cao nhất + 10
 const AFB_CONFIRM_MODAL_GAP        = 20;   // modal    = overlay cao nhất + 20
 const AFB_CONFIRM_RESTORE_DELAY_MS = 350;  // đợi hiệu ứng fade của Bootstrap
 
+// Đếm hộp xác nhận của app đang mở (xem `_isAnyModalOpen`).
+let _afbConfirmOpenCount = 0;
+
+/**
+ * Có modal Frappe/Bootstrap nào đang mở không (kể cả hộp xác nhận của app)?
+ * Dùng để chặn handler Esc cấp `document` đóng luôn cửa sổ Formula Builder —
+ * ⛔ để Esc của modal vừa "Hủy" xong lại kéo theo `closeDialog()` làm MẤT
+ * công thức đang gõ.
+ *
+ * Phủ cả 2 đời Bootstrap Frappe dùng:
+ *   • Bootstrap 3 (Frappe v14): modal đang mở có class `.in`;
+ *   • Bootstrap 4/5 (Frappe v15+): class `.show`.
+ * Thêm `display: block` vì Bootstrap bỏ `.in`/`.show` NGAY khi bắt đầu ẩn,
+ * nhưng element còn `display:block` tới hết hiệu ứng fade (≈300ms) — chính
+ * là khoảnh khắc Esc của modal vừa được xử lý.
+ */
+function _isAnyModalOpen() {
+  if (_afbConfirmOpenCount > 0) return true;
+  try {
+    if (typeof document === "undefined" || !document.querySelector) return false;
+    return !!document.querySelector(".modal.in, .modal.show, .modal[style*='display: block']");
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Chạy hành động đóng UI khi người dùng bấm Esc — NHƯNG ⛔ nếu đang có modal
+ * mở (để modal tự xử lý Esc của nó).
+ *
+ * @param {Function} closeFn hành động đóng (vd: closeDialog)
+ * @returns {boolean} true nếu đã đóng, false nếu bị chặn
+ */
+function _runEscapeClose(closeFn) {
+  if (_isAnyModalOpen()) return false;
+  if (typeof closeFn === "function") closeFn();
+  return true;
+}
+
 // Selector các overlay do UI Formula Builder tự dựng.
 const AFB_OVERLAY_SELECTOR = [
   ".afb-custom-dialog-overlay",
@@ -2467,12 +2514,43 @@ formula_builder.confirm = function (message, on_yes, opts) {
     fields: [{ fieldtype: "HTML", fieldname: "afb_confirm_message", options: message }],
     primary_action_label: opts.yes_label || "Đồng ý",
     secondary_action_label: opts.no_label || "Hủy",
+    // KHÔNG bật `confirm_dialog`: giữ nguyên quy ước Enter KHÔNG kích hoạt nút chính
+    // (hành động phá huỷ chỉ chạy khi bấm chuột/chọn đúng nút).
+    no_focus: true, // tự focus nút Hủy bên dưới thay vì để Frappe focus field
     primary_action() { finish(true); },
     secondary_action() { finish(false); },
   });
 
+  // Đánh dấu có modal đang mở NGAY từ lúc show, để handler Esc cấp `document`
+  // của Formula Builder không đóng builder trong lúc hộp xác nhận còn hiện.
+  _afbConfirmOpenCount += 1;
+  let released = false;
+
   const backdropsBefore = _modalBackdropNodes();
-  try { dlg.show(); } catch (e) { /* vẫn nâng z-index nếu có element */ }
+  try {
+    dlg.show();
+  } catch (e) {
+    // Không show được ⇒ nhả bộ đếm ngay, tránh chặn Esc vĩnh viễn.
+    released = true;
+    _afbConfirmOpenCount = Math.max(0, _afbConfirmOpenCount - 1);
+  }
+
+  // Đưa bàn phím vào modal (nút Hủy) — Esc do modal xử lý.
+  const focusSecondary = function () {
+    try {
+      const btn = typeof dlg.get_secondary_btn === "function" ? dlg.get_secondary_btn() : null;
+      const el = btn && typeof btn.get === "function" ? btn.get(0) : btn;
+      if (el && typeof el.focus === "function") el.focus();
+    } catch (e) { /* ignore */ }
+  };
+  focusSecondary();
+  try {
+    if (dlg.$wrapper && typeof dlg.$wrapper.on === "function") {
+      // Frappe cũng focus field ở `shown.bs.modal`; `no_focus: true` ở trên đã
+      // tắt việc đó, handler này bảo đảm bàn phím nằm ở nút Hủy.
+      dlg.$wrapper.on("shown.bs.modal.afb-confirm", focusSecondary);
+    }
+  } catch (e) { /* ignore */ }
 
   const wrapperEl   = _dialogWrapperElement(dlg);
   const backdropEl  = _newBackdropNode(backdropsBefore);
@@ -2485,6 +2563,9 @@ formula_builder.confirm = function (message, on_yes, opts) {
   if (backdropEl && backdropEl.style) backdropEl.style.zIndex = String(z.backdrop);
 
   const restoreZIndex = function () {
+    if (released) return; // tránh trừ bộ đếm modal 2 lần
+    released = true;
+    _afbConfirmOpenCount = Math.max(0, _afbConfirmOpenCount - 1);
     if (wrapperEl && wrapperEl.style)   wrapperEl.style.zIndex  = prevModalZ || "";
     if (backdropEl && backdropEl.style) backdropEl.style.zIndex = prevBackdropZ || "";
   };
@@ -2518,6 +2599,8 @@ formula_builder.confirm = function (message, on_yes, opts) {
 formula_builder._computeConfirmZIndex   = _computeConfirmZIndex;
 formula_builder._visibleOverlayZIndexes = _visibleOverlayZIndexes;
 formula_builder._hasFormulaBuilderOverlay = _hasFormulaBuilderOverlay;
+formula_builder._isAnyModalOpen         = _isAnyModalOpen;
+formula_builder._runEscapeClose         = _runEscapeClose;
 
 // Shared doc serializer – used by both the dialog editor and patchField previews
 const _SKIP_DOC_TYPES = new Set([
@@ -2703,7 +2786,7 @@ formula_builder.formula.openDialog = function(opts = {}) {
   header.querySelector(".afb-custom-dialog-close").addEventListener("click", closeDialog);
   overlay.addEventListener("click", (e) => { if (e.target === overlay) closeDialog(); });
   // Esc
-  const escHandler = (e) => { if (e.key === "Escape") closeDialog(); };
+  const escHandler = (e) => { if (e.key === "Escape") _runEscapeClose(closeDialog); };
   document.addEventListener("keydown", escHandler);
   const finalClose = () => {
     document.removeEventListener("keydown", escHandler);
