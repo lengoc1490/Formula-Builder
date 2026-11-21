@@ -71,12 +71,63 @@ _TRANSFORM_ALLOWED_FUNCS: frozenset = frozenset({
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+def _normalize_fingerprint_part(part: Any) -> str:
+    """Ép 1 phần của fingerprint về str — dict/list phải ra chuỗi ổn định.
+
+    Trước đây join thẳng `parts` nên truyền dict vào là ném
+    `TypeError: sequence item 1: expected str instance, dict found`,
+    làm cả nhóm binding rơi xuống fallback im lặng.
+    """
+    if isinstance(part, str):
+        return part
+    try:
+        return json.dumps(part, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return str(part)
+
+
+def _make_fingerprint_with(*parts: Any) -> str:
+    """Như `_make_fingerprint` nhưng nhận mọi kiểu (dict/list/số/None).
+
+    Mọi part được chuẩn hoá về str TRƯỚC khi join — không bao giờ ném TypeError.
+    """
+    return hashlib.md5(
+        "|".join(_normalize_fingerprint_part(p) for p in parts).encode()
+    ).hexdigest()[:12]
+
+
 def _make_fingerprint(*parts: str) -> str:
     """Create a stable fingerprint from parts for grouping.
 
     Same parts → same fingerprint → same batch group.
     """
-    return hashlib.md5("|".join(parts).encode()).hexdigest()[:12]
+    return _make_fingerprint_with(*parts)
+
+
+def _parse_source_config(raw: Any) -> dict:
+    """Parse `source_config` về dict — nhận cả JSON string (contract DB) và dict.
+
+    Contract chuẩn: `source_config` lưu trong DB là JSON string. Nhưng caller
+    ngoài (vd B5 AlumGlass dựng binding bằng `"source_config": cfg` với cfg là
+    dict Python) truyền thẳng dict — `json.loads(dict)` ném TypeError, handler
+    bắt lỗi rồi trả default_value ⇒ cấu hình coi như không có tác dụng mà
+    không ai thấy. Nhận cả 2 dạng, giữ nguyên hành vi với string.
+
+    Returns:
+        dict — {} khi None/rỗng/không parse được/không phải object.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return {}
+        try:
+            cfg = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+        return cfg if isinstance(cfg, dict) else {}
+    return {}
 
 
 def _is_batchable(source_type: str) -> bool:
@@ -406,10 +457,15 @@ class BatchBindingResolver:
                 fp_fn = _get_fingerprint_fn(source_type)
                 if fp_fn:
                     try:
-                        cfg = json.loads(b.get("source_config", "{}"))
+                        # source_config có thể là JSON string (contract DB) hoặc
+                        # dict (caller dựng binding trực tiếp, vd AL B5) — parse
+                        # để json.loads(dict) không ném TypeError.
+                        cfg = _parse_source_config(b.get("source_config"))
                         fp = fp_fn(cfg)
                     except Exception:
-                        fp = _make_fingerprint(
+                        # Không đọc được config → vẫn phải group được (không ném);
+                        # fingerprint theo raw, mọi part được ép str an toàn.
+                        fp = _make_fingerprint_with(
                             source_type,
                             b.get("source_config", ""),
                         )

@@ -1838,6 +1838,31 @@ def _fb_row_get(obj, key):
     return getattr(obj, key, None)
 
 
+def _parse_source_config(raw) -> dict:
+    """Parse `source_config` về dict — nhận cả JSON string (contract DB) và dict.
+
+    Contract chuẩn: `source_config` lưu trong DB là JSON string. Nhưng caller
+    ngoài có thể truyền thẳng dict Python (vd engine B5 AlumGlass dựng binding
+    trong mã) — `json.loads(dict)` ném TypeError ⇒ handler trả default_value,
+    cấu hình vô hiệu mà không ai thấy. Nhận cả 2 dạng.
+
+    Returns:
+        dict — {} khi None/rỗng/không parse được/không phải object.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return {}
+        try:
+            cfg = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+        return cfg if isinstance(cfg, dict) else {}
+    return {}
+
+
 def _resolve_template_val(val, doc=None, resolved_so_far=None, row=None, binding=None):
     """Resolve template strings referencing runtime context.
 
@@ -3048,7 +3073,7 @@ def _apply_aggregate_filters(rows, cfg, doc, resolved_so_far, row):
             "order_by": {"type": "string", "description": "Order clause for doctype_query."},
             "limit": {"type": "integer", "description": "Max rows for doctype_query (0 = unlimited)."},
             "key_field": {"type": "string", "description": "Field used as the filter key (like SUMIF criteria field), e.g. 'cost_bucket'."},
-            "key_value": {"type": "string", "description": "Value to match on key_field; supports {{row.field}}, {{doc.field}}, {{resolved.field}} templates. Empty → aggregate over all rows."},
+            "key_value": {"type": "string", "description": "Value to match on key_field; supports {{row.field}}, {{doc.field}}, {{resolved.field}} and {{binding.field}} templates (e.g. {{binding.variable_name}} — dùng 1 config chung cho nhiều binding). Empty → aggregate over all rows."},
             "value_field": {"type": "string", "description": "Field to aggregate, e.g. 'line_total'. Required except when aggregate=count. Preferred over sum_field when both present."},
             "sum_field": {"type": "string", "description": "ALIAS của value_field (backward-compat với AL Cost Bucket source_config cũ dùng sum_field). Chỉ đọc khi value_field rỗng. KHÔNG thay đổi schema chuẩn — value_field vẫn required (trừ count)."},
             "aggregate": {"type": "string", "enum": ["sum", "avg", "min", "max", "count", "first", "last"], "description": "Aggregation function."},
@@ -3074,7 +3099,7 @@ def _apply_aggregate_filters(rows, cfg, doc, resolved_so_far, row):
     default_cache_ttl=300,
 )
 def _handle_aggregate_from_items(binding, doc, resolved_so_far):
-    cfg = json.loads(binding.get("source_config") or "{}")
+    cfg = _parse_source_config(binding.get("source_config"))
     default_value = cfg.get("default_value", binding.get("default_value"))
     data_type = binding.get("data_type") or cfg.get("type", "Float")
     key_field = cfg.get("key_field", "")
@@ -3096,7 +3121,11 @@ def _handle_aggregate_from_items(binding, doc, resolved_so_far):
 
     # Lọc theo key_field == key_value (key_value rỗng → giữ toàn bộ)
     if key_field and key_value not in (None, ""):
-        kv = _resolve_template_val(key_value, doc, resolved_so_far, row)
+        # Truyền binding để {{binding.variable_name}} resolve được — cho phép
+        # 1 source_config dùng chung cho mọi bucket (engine đặt
+        # variable_name = bucket_code).
+        kv = _resolve_template_val(
+            key_value, doc, resolved_so_far, row, binding=binding)
         if kv is not None and kv != "":
             rows = [
                 r for r in rows
@@ -3152,11 +3181,11 @@ def _resolve_aggregate_from_items_batch(bindings, doc, resolved_so_far):
     # Group configs chia sẻ rows nguồn → chỉ resolve rows 1 lần.
     # key_value là template per-binding nên không thể gộp theo fingerprint hoàn toàn;
     # ta resolve rows theo cfg đầu group rồi reuse cho các binding cùng rows_source.
-    cfg0 = json.loads(bindings[0].get("source_config") or "{}")
+    cfg0 = _parse_source_config(bindings[0].get("source_config"))
     shared_rows = _resolve_aggregate_rows(cfg0, doc, resolved_so_far)
 
     for b in bindings:
-        cfg = json.loads(b.get("source_config") or "{}")
+        cfg = _parse_source_config(b.get("source_config"))
         default_value = cfg.get("default_value", b.get("default_value"))
         data_type = b.get("data_type") or cfg.get("type", "Float")
         key_field = cfg.get("key_field", "")
@@ -3176,7 +3205,10 @@ def _resolve_aggregate_from_items_batch(bindings, doc, resolved_so_far):
             rows = _apply_aggregate_filters(rows, cfg, doc, resolved_so_far, row)
 
         if key_field and key_value not in (None, ""):
-            kv = _resolve_template_val(key_value, doc, resolved_so_far, row)
+            # binding=b để {{binding.variable_name}} resolve per-binding —
+            # cùng 1 config, mỗi bucket ra tổng riêng (không phải tổng tất cả).
+            kv = _resolve_template_val(
+                key_value, doc, resolved_so_far, row, binding=b)
             if kv is not None and kv != "":
                 rows = [
                     r for r in rows

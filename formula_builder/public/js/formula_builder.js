@@ -1615,11 +1615,13 @@ class AluglassFormulaEditor {
 
   _actClear() {
     if (!this.getValue()) return;
-    frappe.confirm("Xóa toàn bộ công thức?", () => {
+    // Dùng helper thay `frappe.confirm`: trong dialog Formula Builder, modal
+    // Bootstrap chuẩn bị overlay tự dựng (z-index 1100) che mất.
+    formula_builder.confirm("Xóa toàn bộ công thức?", () => {
       this.setValue(""); this.$valbar.html(`<span style="color:var(--afb-text3)">Nhập công thức để bắt đầu...</span>`);
       this._setPanelContent("result",`<span style="color:var(--afb-text3)">Nhấn ▶ Chạy thử để xem kết quả.</span>`);
       const sbval = this._q(`#sbval-${this._uid}`); if (sbval) { sbval.textContent = "—"; sbval.className = "afb-statusbar-item"; }
-    });
+    }, { yes_label: "Xóa" });
   }
 
   _addHistory(formula, result, success) {
@@ -2287,6 +2289,235 @@ function _esc(str) {
 }
 
 formula_builder.formula._esc = _esc; // export for formula_builder_field.js
+
+// ─── §9.1  HỘP XÁC NHẬN – LUÔN NẰM TRÊN OVERLAY CỦA FORMULA BUILDER ─────────
+// VÌ SAO CẦN: giao diện Formula Builder tự dựng overlay riêng (`position:fixed`,
+// z-index 1100 cho dialog chính; 1000010 cho suggest/shortcuts/diff/save-template).
+// `frappe.confirm` tạo modal Bootstrap chuẩn (z-index ~1040/1050) ⇒ nằm DƯỚI
+// overlay, người dùng chỉ thấy màn tối và ⛔ bấm được. Helper này:
+//   • ngoài overlay  → gọi `frappe.confirm` như cũ (giữ UX chuẩn của Frappe);
+//   • trong overlay  → dựng `frappe.ui.Dialog` rồi nâng z-index modal + backdrop
+//                      lên trên lớp overlay cao nhất đang hiện.
+// Phần tính z-index là hàm THUẦN (`_computeConfirmZIndex`) để test bằng Node —
+// xem formula_builder/tests/js/test_confirm_zindex.js.
+
+const AFB_CONFIRM_BASE_ZINDEX      = 1050; // modal Bootstrap/Frappe mặc định
+const AFB_CONFIRM_BACKDROP_GAP     = 10;   // backdrop = overlay cao nhất + 10
+const AFB_CONFIRM_MODAL_GAP        = 20;   // modal    = overlay cao nhất + 20
+const AFB_CONFIRM_RESTORE_DELAY_MS = 350;  // đợi hiệu ứng fade của Bootstrap
+
+// Selector các overlay do UI Formula Builder tự dựng.
+const AFB_OVERLAY_SELECTOR = [
+  ".afb-custom-dialog-overlay",
+  ".afb-suggest-overlay",
+  ".afb-shortcuts-overlay",
+  ".afb-diff-overlay",
+  ".afb-save-tmpl-overlay",
+].join(",");
+
+/** Ép giá trị z-index về số nguyên dương, hoặc null nếu không hợp lệ. */
+function _zIndexOrNull(value) {
+  if (value === null || value === undefined) return null;
+  const n = typeof value === "number" ? value : parseInt(String(value).trim(), 10);
+  if (!isFinite(n) || isNaN(n) || n <= 0) return null;
+  return Math.floor(n);
+}
+
+/**
+ * Tính z-index cho hộp xác nhận. HÀM THUẦN — không đọc DOM, không gọi frappe.
+ *
+ * @param {Array<number|string|null>} visibleZIndexes z-index các overlay đang hiện
+ * @param {number|string} [baseZIndex] z-index nền chuẩn của modal Frappe
+ * @returns {{modal: number, backdrop: number}} luôn là số nguyên dương
+ */
+function _computeConfirmZIndex(visibleZIndexes, baseZIndex) {
+  const base = _zIndexOrNull(baseZIndex) || AFB_CONFIRM_BASE_ZINDEX;
+  let topOverlay = 0;
+  const list = Array.isArray(visibleZIndexes) ? visibleZIndexes : [];
+  for (let i = 0; i < list.length; i++) {
+    const z = _zIndexOrNull(list[i]);
+    if (z !== null && z > topOverlay) topOverlay = z;
+  }
+  if (topOverlay >= base) {
+    return {
+      modal:    topOverlay + AFB_CONFIRM_MODAL_GAP,
+      backdrop: topOverlay + AFB_CONFIRM_BACKDROP_GAP,
+    };
+  }
+  const backdrop = Math.max(1, base - AFB_CONFIRM_BACKDROP_GAP);
+  return {
+    modal:    Math.max(backdrop + 1, base),
+    backdrop: backdrop,
+  };
+}
+
+/** Các node overlay Formula Builder đang có trong DOM. */
+function _formulaBuilderOverlayNodes() {
+  try {
+    if (typeof document === "undefined" || !document.querySelectorAll) return [];
+    return Array.prototype.slice.call(document.querySelectorAll(AFB_OVERLAY_SELECTOR));
+  } catch (e) {
+    return [];
+  }
+}
+
+/** Node có đang hiện thật không (loại node đã remove / display:none). */
+function _isNodeVisible(node) {
+  if (!node || node.hidden) return false;
+  try {
+    if (typeof window !== "undefined" && window.getComputedStyle) {
+      const cs = window.getComputedStyle(node);
+      if (cs && (cs.display === "none" || cs.visibility === "hidden")) return false;
+    }
+  } catch (e) { /* ignore */ }
+  try {
+    if (typeof node.getClientRects === "function") return node.getClientRects().length > 0;
+  } catch (e) { /* ignore */ }
+  return node.isConnected !== false && !!node.parentNode;
+}
+
+/** Đọc z-index của node: ưu tiên inline, sau đó computed style. */
+function _readZIndex(node) {
+  if (!node) return null;
+  try {
+    const inline = node.style ? node.style.zIndex : "";
+    if (inline !== "" && inline !== null && inline !== undefined) return inline;
+  } catch (e) { /* ignore */ }
+  try {
+    if (typeof window !== "undefined" && window.getComputedStyle) {
+      return window.getComputedStyle(node).zIndex;
+    }
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
+/** Danh sách z-index của các overlay đang hiện (dùng cho `_computeConfirmZIndex`). */
+function _visibleOverlayZIndexes() {
+  return _formulaBuilderOverlayNodes().filter(_isNodeVisible).map(_readZIndex);
+}
+
+/** Có overlay Formula Builder nào đang hiện không. */
+function _hasFormulaBuilderOverlay() {
+  return _formulaBuilderOverlayNodes().some(_isNodeVisible);
+}
+
+/** Lấy element DOM từ `$wrapper` (jQuery object) hoặc node thuần. */
+function _dialogWrapperElement(dlg) {
+  const w = dlg && dlg.$wrapper;
+  if (!w) return null;
+  try {
+    if (typeof w.get === "function") return w.get(0) || null;
+    if (w.nodeType || w.style) return w;
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
+/** Các node backdrop hiện có trong DOM. */
+function _modalBackdropNodes() {
+  try {
+    if (typeof document === "undefined" || !document.querySelectorAll) return [];
+    return Array.prototype.slice.call(document.querySelectorAll(".modal-backdrop"));
+  } catch (e) {
+    return [];
+  }
+}
+
+/** Backdrop MỚI xuất hiện sau khi show dialog (không lấy backdrop của modal cũ). */
+function _newBackdropNode(before) {
+  const after = _modalBackdropNodes();
+  for (let i = after.length - 1; i >= 0; i--) {
+    if (before.indexOf(after[i]) === -1) return after[i];
+  }
+  return after.length ? after[after.length - 1] : null;
+}
+
+/**
+ * Hộp xác nhận dùng chung cho app.
+ *
+ * @param {string} message nội dung (cho phép HTML như msgprint)
+ * @param {Function} on_yes gọi khi người dùng bấm nút chính
+ * @param {object} [opts] { title, yes_label, no_label, on_no }
+ * @returns {object|null} Dialog khi ở trong overlay, null khi dùng frappe.confirm
+ */
+formula_builder.confirm = function (message, on_yes, opts) {
+  opts = opts || {};
+  const can_dialog =
+    typeof frappe !== "undefined" && frappe.ui && typeof frappe.ui.Dialog === "function";
+
+  if (!can_dialog || !_hasFormulaBuilderOverlay()) {
+    // Ngoài trang Formula Builder: giữ nguyên UX chuẩn của Frappe.
+    frappe.confirm(message, on_yes, opts.on_no);
+    return null;
+  }
+
+  let settled = false;
+  function finish(yes) {
+    if (settled) return;
+    settled = true;
+    try { dlg.hide(); } catch (e) { /* ignore */ }
+    if (yes) {
+      if (typeof on_yes === "function") on_yes();
+    } else if (typeof opts.on_no === "function") {
+      opts.on_no();
+    }
+  }
+
+  const dlg = new frappe.ui.Dialog({
+    title: opts.title || "Xác nhận",
+    fields: [{ fieldtype: "HTML", fieldname: "afb_confirm_message", options: message }],
+    primary_action_label: opts.yes_label || "Đồng ý",
+    secondary_action_label: opts.no_label || "Hủy",
+    primary_action() { finish(true); },
+    secondary_action() { finish(false); },
+  });
+
+  const backdropsBefore = _modalBackdropNodes();
+  try { dlg.show(); } catch (e) { /* vẫn nâng z-index nếu có element */ }
+
+  const wrapperEl   = _dialogWrapperElement(dlg);
+  const backdropEl  = _newBackdropNode(backdropsBefore);
+  const prevModalZ  = wrapperEl && wrapperEl.style ? wrapperEl.style.zIndex : "";
+  const prevBackdropZ = backdropEl && backdropEl.style ? backdropEl.style.zIndex : "";
+
+  // Nền = z-index THẬT của modal vừa show (Frappe v14 = 1040, v15 = 1050, ...)
+  const z = _computeConfirmZIndex(_visibleOverlayZIndexes(), _readZIndex(wrapperEl));
+  if (wrapperEl && wrapperEl.style)  wrapperEl.style.zIndex  = String(z.modal);
+  if (backdropEl && backdropEl.style) backdropEl.style.zIndex = String(z.backdrop);
+
+  const restoreZIndex = function () {
+    if (wrapperEl && wrapperEl.style)   wrapperEl.style.zIndex  = prevModalZ || "";
+    if (backdropEl && backdropEl.style) backdropEl.style.zIndex = prevBackdropZ || "";
+  };
+  const scheduleRestore = function () {
+    try {
+      if (typeof window !== "undefined" && typeof window.setTimeout === "function") {
+        window.setTimeout(restoreZIndex, AFB_CONFIRM_RESTORE_DELAY_MS);
+        return;
+      }
+    } catch (e) { /* ignore */ }
+    restoreZIndex();
+  };
+
+  const previousOnHide = typeof dlg.on_hide === "function" ? dlg.on_hide : null;
+  dlg.on_hide = function () {
+    if (previousOnHide) {
+      try { previousOnHide.apply(dlg, arguments); } catch (e) { /* ignore */ }
+    }
+    // Esc / bấm ngoài = Hủy: ⛔ không chạy hành động chính.
+    if (!settled) {
+      settled = true;
+      if (typeof opts.on_no === "function") opts.on_no();
+    }
+    scheduleRestore();
+  };
+
+  return dlg;
+};
+
+// Export để test Node thuần (formula_builder/tests/js/test_confirm_zindex.js)
+formula_builder._computeConfirmZIndex   = _computeConfirmZIndex;
+formula_builder._visibleOverlayZIndexes = _visibleOverlayZIndexes;
+formula_builder._hasFormulaBuilderOverlay = _hasFormulaBuilderOverlay;
 
 // Shared doc serializer – used by both the dialog editor and patchField previews
 const _SKIP_DOC_TYPES = new Set([

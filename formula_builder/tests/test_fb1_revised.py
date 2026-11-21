@@ -27,6 +27,10 @@ from formula_builder.api.data_source_registry import (
     get_handler,
     is_batchable,
 )
+from formula_builder.api.batch_binding_resolver import (
+    _parse_source_config,
+    resolve_all_bindings_batch,
+)
 from formula_builder.api.source_type_registry import SourceTypeRegistry
 from formula_builder.formula_utils.engine_public import FormulaEngine
 
@@ -719,6 +723,137 @@ class TestAggregateFromItemsResolved(unittest.TestCase):
                  "key_field": "cost_bucket", "value_field": "line_total", "aggregate": "sum"}
         cfg_b = dict(cfg_a, rows_var="other_lines")
         self.assertNotEqual(fn(cfg_a), fn(cfg_b))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 6c. aggregate_from_items — source_config là DICT + {{binding.variable_name}}
+#     (2026-11-20) Bắt lỗi engine AL B5 truyền dict → json.loads ném TypeError
+#     ⇒ cả nhóm binding rơi về default, setting Cost Bucket vô hiệu im lặng.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+B5_ROWS = [
+    {"cost_bucket": "VL_NHOM", "line_total": 100.0},
+    {"cost_bucket": "VL_KINH", "line_total": 250.0},
+    {"cost_bucket": "VL_NHOM", "line_total": 50.0},
+    {"cost_bucket": "VL_PK", "line_total": 30.0},
+]
+
+
+def _b5_binding(bucket_code, source_config):
+    """Binding đúng như engine B5 dựng: variable_name = bucket_code."""
+    return {
+        "variable_name": bucket_code,
+        "source_type": "aggregate_from_items",
+        "source_config": source_config,
+        "data_type": "Float",
+        "default_value": 0,
+    }
+
+
+class TestAggregateSourceConfigDict(unittest.TestCase):
+    """source_config là dict Python phải chạy y như JSON string (backward compat)."""
+
+    def setUp(self):
+        self.log = mock.patch.object(frappe, "log_error")
+        self.log_mock = self.log.start()
+        self.addCleanup(self.log.stop)
+        self.cfg = {
+            "rows_source": "resolved",
+            "rows_var": "rows",
+            "key_field": "cost_bucket",
+            "key_value": "VL_NHOM",
+            "value_field": "line_total",
+            "aggregate": "sum",
+        }
+
+    def test_parse_source_config_variants(self):
+        self.assertEqual(_parse_source_config(self.cfg), self.cfg)
+        self.assertEqual(_parse_source_config(json.dumps(self.cfg)), self.cfg)
+        self.assertEqual(_parse_source_config(None), {})
+        self.assertEqual(_parse_source_config(""), {})
+        self.assertEqual(_parse_source_config("{bad json"), {})
+        self.assertEqual(_parse_source_config("[1,2]"), {})
+
+    def test_batch_handler_accepts_dict_config(self):
+        b = _b5_binding("VL_NHOM", self.cfg)  # dict, KHÔNG json.dumps
+        res = _resolve_aggregate_from_items_batch([b], None, {"rows": B5_ROWS})
+        self.assertEqual(res["VL_NHOM"], 150.0)
+        # Không được rơi vào default_value (0) do lỗi parse.
+        self.assertNotEqual(res["VL_NHOM"], 0)
+
+    def test_resolve_all_bindings_batch_accepts_dict_config(self):
+        b = _b5_binding("VL_NHOM", self.cfg)
+        res = resolve_all_bindings_batch(
+            [b], doc=None, pre_resolved={"rows": B5_ROWS})
+        self.assertEqual(res["VL_NHOM"], 150.0)
+        # Resolver không được log lỗi group (group failed) khi config là dict
+        titles = [str(c.kwargs.get("title", "")) for c in self.log_mock.call_args_list]
+        self.assertFalse(
+            [t for t in titles if "group failed" in t],
+            "binding dict source_config làm vỡ group: %s" % titles)
+
+    def test_resolve_all_bindings_batch_dict_and_string_same_result(self):
+        b_dict = _b5_binding("VL_NHOM", self.cfg)
+        b_str = _b5_binding("VL_NHOM", json.dumps(self.cfg))
+        res_dict = resolve_all_bindings_batch(
+            [b_dict], doc=None, pre_resolved={"rows": B5_ROWS})
+        res_str = resolve_all_bindings_batch(
+            [b_str], doc=None, pre_resolved={"rows": B5_ROWS})
+        self.assertEqual(res_dict, res_str)
+
+
+class TestAggregateBindingVariableTemplate(unittest.TestCase):
+    """key_value={{binding.variable_name}} — 1 config dùng chung cho mọi bucket."""
+
+    def setUp(self):
+        self.log = mock.patch.object(frappe, "log_error")
+        self.log.start()
+        self.addCleanup(self.log.stop)
+
+    def _shared_cfg(self, **over):
+        cfg = {
+            "rows_source": "resolved",
+            "rows_var": "rows",
+            "key_field": "cost_bucket",
+            "key_value": "{{binding.variable_name}}",
+            "value_field": "line_total",
+            "aggregate": "sum",
+        }
+        cfg.update(over)
+        return cfg
+
+    def test_single_handler_resolves_own_bucket(self):
+        b = _b5_binding("VL_KINH", json.dumps(self._shared_cfg()))
+        self.assertEqual(
+            _handle_aggregate_from_items(b, None, {"rows": B5_ROWS}), 250.0)
+
+    def test_two_buckets_different_totals(self):
+        """Bắt lỗi 'mọi bucket bằng tổng tất cả' — tổng tất cả là 430."""
+        cfg = json.dumps(self._shared_cfg())
+        b1 = _b5_binding("VL_NHOM", cfg)
+        b2 = _b5_binding("VL_KINH", cfg)
+        res = _resolve_aggregate_from_items_batch(
+            [b1, b2], None, {"rows": B5_ROWS})
+        self.assertEqual(res["VL_NHOM"], 150.0)
+        self.assertEqual(res["VL_KINH"], 250.0)
+        self.assertNotEqual(res["VL_NHOM"], res["VL_KINH"])
+        self.assertNotEqual(res["VL_NHOM"], 430.0)
+
+    def test_three_buckets_via_resolver_dict_config(self):
+        cfg = self._shared_cfg()
+        bindings = [
+            _b5_binding("VL_NHOM", cfg),
+            _b5_binding("VL_KINH", cfg),
+            _b5_binding("VL_PK", cfg),
+        ]
+        res = resolve_all_bindings_batch(
+            bindings, doc=None, pre_resolved={"rows": B5_ROWS})
+        self.assertEqual(res["VL_NHOM"], 150.0)
+        self.assertEqual(res["VL_KINH"], 250.0)
+        self.assertEqual(res["VL_PK"], 30.0)
+        self.assertEqual(sum(
+            res[k] for k in ("VL_NHOM", "VL_KINH", "VL_PK")), 430.0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
